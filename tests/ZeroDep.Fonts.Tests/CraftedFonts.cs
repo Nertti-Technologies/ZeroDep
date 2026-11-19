@@ -262,7 +262,7 @@ internal static class CraftedFonts
 
     private static byte[] Wrap(byte[] priv)
     {
-        byte[] head = Encoding.ASCII.GetBytes("%!PS-AdobeFont-1.0: X\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\ncurrentfile eexec\n");
+        byte[] head = Encoding.ASCII.GetBytes("%!FontType1-1.0: X\n/FontMatrix [0.001 0 0 0.001 0 0] readonly def\ncurrentfile eexec\n");
         for (int lead = 0; ; lead++)
         {
             byte[] enc = Encrypt(new byte[] { (byte)lead, 0, 0, 0 }.Concat(priv).ToArray(), 55665);
