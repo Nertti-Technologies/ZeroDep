@@ -70,4 +70,11 @@ public sealed class OpenExceptionContractTests
 
         OpenThrows(ms.ToArray());
     }
+
+    [Fact]
+    public void UnsupportedRc4KeyLengthIsASyntaxError()
+    {
+        string enc = $"/Encrypt << /Filter /Standard /V 2 /R 3 /Length 256 /P -4 /O <{new string('A', 64)}> /U <{new string('B', 64)}> >> /ID [<00> <00>]";
+        OpenThrows(Classic("<< /Type /Catalog /Pages 2 0 R >>", enc));
+    }
 }

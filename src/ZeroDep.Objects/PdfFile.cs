@@ -445,7 +445,6 @@ internal sealed class PdfFile : IDisposable
 
         int v = IntOf(enc, "V", 0);
         int r = IntOf(enc, "R", 0);
-        int lengthBits = IntOf(enc, "Length", 40);
         EncryptionAlgorithm algorithm = DetermineAlgorithm(enc, v, r);
 
         Algorithm = algorithm;
@@ -453,12 +452,33 @@ internal sealed class PdfFile : IDisposable
         Permissions = IntOf(enc, "P", 0);
         EncryptMetadata = !(enc["EncryptMetadata"] is PdfBoolean meta) || meta.Value;
 
-        int keyLengthBytes = algorithm == EncryptionAlgorithm.Aes256 ? 32 : lengthBits / 8;
+        // Strings and streams can use different crypt filters (/StrF, /StmF); "Identity" means "not encrypted".
+        EncryptionAlgorithm streamMethod = CryptMethod(enc, "StmF", v, r, algorithm);
+        EncryptionAlgorithm stringMethod = CryptMethod(enc, "StrF", v, r, algorithm);
+
+        int keyLengthBytes = algorithm == EncryptionAlgorithm.Aes256 ? 32 : KeyLengthBytes(enc, v, algorithm);
         _handler = new StandardSecurityHandler(
             algorithm, r, keyLengthBytes,
             StringBytes(enc, "O"), StringBytes(enc, "U"), StringBytes(enc, "OE"), StringBytes(enc, "UE"),
-            Permissions, FirstIdBytes(), EncryptMetadata, password);
+            Permissions, FirstIdBytes(), EncryptMetadata, password, streamMethod, stringMethod);
         Authentication = _handler.Authentication;
+    }
+
+    // The file-key length for revisions 2-4. Version 4 states it on the crypt filter (/CF/<StmF>/Length, which
+    // writers give either in bytes or in bits); otherwise the top-level /Length in bits applies. Without either,
+    // AESV2 implies a 128-bit key and RC4 the 40-bit default.
+    private int KeyLengthBytes(PdfDictionary enc, int v, EncryptionAlgorithm algorithm)
+    {
+        if (v == 4 && CryptFilter(enc, "StmF") is PdfDictionary filter && filter["Length"] is PdfNumber cfLength)
+        {
+            long value = cfLength.AsInt64;
+            return value >= 40 ? (int)Math.Min(value / 8, int.MaxValue) : (int)Math.Max(value, 0);
+        }
+        if (enc["Length"] is PdfNumber length)
+        {
+            return (int)Math.Max(Math.Min(length.AsInt64 / 8, int.MaxValue), 0);
+        }
+        return algorithm == EncryptionAlgorithm.Aes128 ? 16 : 5;
     }
 
     private EncryptionAlgorithm DetermineAlgorithm(PdfDictionary enc, int v, int r)
@@ -476,17 +496,34 @@ internal sealed class PdfFile : IDisposable
         return EncryptionAlgorithm.Rc4;
     }
 
-    private string CryptFilterMethod(PdfDictionary enc)
+    // The cipher one crypt filter applies, with None for the Identity filter and for /CFM /None.
+    private EncryptionAlgorithm CryptMethod(PdfDictionary enc, string key, int v, int r, EncryptionAlgorithm algorithm)
     {
-        string name = (enc["StmF"] as PdfName)?.Value ?? "StdCF";
-        if (Resolve(enc["CF"] ?? PdfNull.Instance) is PdfDictionary cf
-            && Resolve(cf[name] ?? PdfNull.Instance) is PdfDictionary filter
-            && filter["CFM"] is PdfName cfm)
+        if (v < 4) return algorithm;
+        if ((enc[key] as PdfName)?.Value == "Identity") return EncryptionAlgorithm.None;
+
+        string? cfm = (CryptFilter(enc, key)?["CFM"] as PdfName)?.Value;
+        switch (cfm)
         {
-            return cfm.Value;
+            case "None": return EncryptionAlgorithm.None;
+            case "AESV2": return v >= 5 || r >= 5 ? EncryptionAlgorithm.Aes256 : EncryptionAlgorithm.Aes128;
+            case "AESV3": return EncryptionAlgorithm.Aes256;
+            case "V2": return v >= 5 || r >= 5 ? EncryptionAlgorithm.Aes256 : EncryptionAlgorithm.Rc4;
+            default: return v >= 5 || r >= 5 ? EncryptionAlgorithm.Aes256 : EncryptionAlgorithm.Rc4;
         }
-        return "V2";
     }
+
+    private PdfDictionary? CryptFilter(PdfDictionary enc, string key)
+    {
+        string name = (enc[key] as PdfName)?.Value ?? "StdCF";
+        return Resolve(enc["CF"] ?? PdfNull.Instance) is PdfDictionary cf
+            && Resolve(cf[name] ?? PdfNull.Instance) is PdfDictionary filter
+            ? filter
+            : null;
+    }
+
+    private string CryptFilterMethod(PdfDictionary enc)
+        => (CryptFilter(enc, "StmF")?["CFM"] as PdfName)?.Value ?? "V2";
 
     private PdfObject DecryptObject(PdfObject value, int objectNumber, int generation, int depth)
     {
@@ -511,7 +548,12 @@ internal sealed class PdfFile : IDisposable
             case PdfStream stream:
             {
                 PdfDictionary dict = DecryptDictionary(stream.Dictionary, objectNumber, generation, depth + 1);
-                byte[] raw = _handler!.DecryptStream(stream.GetRawBytes(), objectNumber, generation);
+                string? type = (stream.Dictionary["Type"] as PdfName)?.Value;
+
+                // Cross-reference streams are never encrypted, and with /EncryptMetadata false neither is
+                // the document metadata stream (ISO 32000-2 §7.5.8.2, §7.6.3.1).
+                bool plain = type == "XRef" || (type == "Metadata" && !EncryptMetadata);
+                byte[] raw = plain ? stream.GetRawBytes() : _handler!.DecryptStream(stream.GetRawBytes(), objectNumber, generation);
                 return new PdfStream(dict, raw);
             }
             default:
