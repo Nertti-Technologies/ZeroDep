@@ -82,7 +82,7 @@ internal sealed class JsonWriter
     public JsonWriter Value(double value)
     {
         BeforeValue();
-        if (double.IsNaN(value) || double.IsInfinity(value)) _sb.Append('0');
+        if (double.IsNaN(value) || double.IsInfinity(value)) _sb.Append("null"); // JSON has no NaN or infinity
         else _sb.Append(value.ToString("R", CultureInfo.InvariantCulture));
         return this;
     }
@@ -127,8 +127,9 @@ internal sealed class JsonWriter
     private void AppendString(string s)
     {
         _sb.Append('"');
-        foreach (char c in s)
+        for (int i = 0; i < s.Length; i++)
         {
+            char c = s[i];
             switch (c)
             {
                 case '"': _sb.Append("\\\""); break;
@@ -138,11 +139,23 @@ internal sealed class JsonWriter
                 case '\n': _sb.Append("\\n"); break;
                 case '\r': _sb.Append("\\r"); break;
                 case '\t': _sb.Append("\\t"); break;
+                case (char)0x2028: // line and paragraph separators: valid JSON, but they end a JavaScript line
+                case (char)0x2029:
+                    AppendUnicodeEscape(c);
+                    break;
                 default:
                     if (c < 0x20)
                     {
-                        _sb.Append("\\u");
-                        _sb.Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                        AppendUnicodeEscape(c);
+                    }
+                    else if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                    {
+                        _sb.Append(c).Append(s[i + 1]);
+                        i++;
+                    }
+                    else if (char.IsSurrogate(c))
+                    {
+                        AppendUnicodeEscape(c); // an unpaired surrogate cannot be encoded as UTF-8
                     }
                     else
                     {
@@ -152,6 +165,12 @@ internal sealed class JsonWriter
             }
         }
         _sb.Append('"');
+    }
+
+    private void AppendUnicodeEscape(char c)
+    {
+        _sb.Append("\\u");
+        _sb.Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
     }
 
     private sealed class Frame
