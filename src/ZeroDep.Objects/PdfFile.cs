@@ -24,6 +24,10 @@ internal sealed class PdfFile : IDisposable
     private readonly Dictionary<int, PdfObject> _objectCache = new Dictionary<int, PdfObject>();
     private readonly Dictionary<int, ObjStmData?> _objectStreamCache = new Dictionary<int, ObjStmData?>();
 
+    // Objects being materialized right now. An object stream that (directly or through another object
+    // stream) contains itself would otherwise recurse until the stack overflows.
+    private readonly HashSet<int> _loading = new HashSet<int>();
+
     private Dictionary<int, XrefEntry>? _xref;
     private PdfDictionary? _trailer;
     private StandardSecurityHandler? _handler;
@@ -69,6 +73,11 @@ internal sealed class PdfFile : IDisposable
             file.SetupEncryption(password);
             return file;
         }
+        catch (Exception ex) when (IsTranslatable(ex))
+        {
+            source.Dispose();
+            throw new PdfSyntaxException("The file structure could not be read.", ex);
+        }
         catch
         {
             source.Dispose();
@@ -76,35 +85,59 @@ internal sealed class PdfFile : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether <paramref name="ex"/> should surface as a <see cref="PdfSyntaxException"/>: every failure
+    /// caused by the file's content does, while out-of-memory is left to the host.
+    /// </summary>
+    internal static bool IsTranslatable(Exception ex) => ex is not PdfSyntaxException && ex is not OutOfMemoryException;
+
     /// <summary>Resolves <paramref name="value"/> if it is an indirect reference; otherwise returns it unchanged.</summary>
     public PdfObject Resolve(PdfObject value)
         => value is PdfReference reference ? GetObject(reference.ObjectNumber) : value;
 
     /// <summary>Materializes the object with the given number, or <see cref="PdfNull"/> if unknown/free.</summary>
+    /// <exception cref="PdfSyntaxException">The object is malformed or exceeds a structural limit.</exception>
     public PdfObject GetObject(int number)
     {
         if (_objectCache.TryGetValue(number, out var cached)) return cached;
 
-        PdfObject result = PdfNull.Instance;
-        if (_xref!.TryGetValue(number, out var entry))
+        // A reference back to an object that is still being loaded is a cycle (for example an object
+        // stream listed as compressed inside itself). It resolves to null and is not cached, so the
+        // outer load still completes normally.
+        if (!_loading.Add(number)) return PdfNull.Instance;
+        try
         {
-            switch (entry.Type)
+            PdfObject result = PdfNull.Instance;
+            if (_xref!.TryGetValue(number, out var entry))
             {
-                case XrefEntryType.InUse:
-                    result = LoadObjectAt(entry.Field2);
-                    break;
-                case XrefEntryType.Compressed:
-                    result = LoadFromObjectStream((int)entry.Field2, entry.Field3);
-                    break;
-                case XrefEntryType.Free:
-                default:
-                    result = PdfNull.Instance;
-                    break;
+                switch (entry.Type)
+                {
+                    case XrefEntryType.InUse:
+                        result = LoadObjectAt(entry.Field2);
+                        break;
+                    case XrefEntryType.Compressed:
+                        result = entry.Field2 >= 0 && entry.Field2 <= int.MaxValue
+                            ? LoadFromObjectStream((int)entry.Field2, entry.Field3)
+                            : PdfNull.Instance;
+                        break;
+                    case XrefEntryType.Free:
+                    default:
+                        result = PdfNull.Instance;
+                        break;
+                }
             }
-        }
 
-        _objectCache[number] = result;
-        return result;
+            _objectCache[number] = result;
+            return result;
+        }
+        catch (Exception ex) when (IsTranslatable(ex))
+        {
+            throw new PdfSyntaxException($"Object {number} could not be read.", ex);
+        }
+        finally
+        {
+            _loading.Remove(number);
+        }
     }
 
     private void BuildCrossReference()
@@ -121,7 +154,9 @@ internal sealed class PdfFile : IDisposable
             Merge(table, section.Entries);
             trailer ??= section.Trailer;
 
-            if (section.XRefStm.HasValue && visited.Add(section.XRefStm.Value))
+            // An /XRefStm outside the file is ignored, exactly like an out-of-range /Prev.
+            if (section.XRefStm.HasValue && section.XRefStm.Value >= 0 && section.XRefStm.Value < _source.Length
+                && visited.Add(section.XRefStm.Value))
             {
                 XrefSection hybrid = ReadSectionAt(section.XRefStm.Value);
                 Merge(table, hybrid.Entries);
@@ -154,7 +189,10 @@ internal sealed class PdfFile : IDisposable
         var lexer = new PdfLexer(window, 0, window.Length);
         lexer.Next(); // 'startxref'
         Token offset = lexer.Next();
-        if (offset.Type != TokenType.Integer) throw new PdfSyntaxException("Invalid 'startxref' offset.");
+        if (offset.Type != TokenType.Integer || offset.IntValue < 0 || offset.IntValue >= _source.Length)
+        {
+            throw new PdfSyntaxException("Invalid 'startxref' offset.");
+        }
         return offset.IntValue;
     }
 
@@ -173,6 +211,10 @@ internal sealed class PdfFile : IDisposable
     {
         long trailerPos = _source.IndexOf(TrailerKeyword, position);
         if (trailerPos < 0) throw new PdfSyntaxException("Classic cross-reference table without a trailer.");
+        if (trailerPos - position > Limits.MaxObjectWindow)
+        {
+            throw new PdfSyntaxException("Classic cross-reference table exceeds the 256 MiB window limit.");
+        }
 
         byte[] tableBytes = _source.ReadBytes(position, (int)(trailerPos - position));
         var lexer = new PdfLexer(tableBytes, 0, tableBytes.Length);
@@ -198,10 +240,10 @@ internal sealed class PdfFile : IDisposable
                     throw new PdfSyntaxException("Malformed xref entry.");
                 }
 
-                int objectNumber = (int)(startNumber + i);
+                int objectNumber = CheckedObjectNumber(startNumber + i);
                 if (entries.ContainsKey(objectNumber)) continue;
                 entries[objectNumber] = typeToken.Text == "n"
-                    ? XrefEntry.InUse(offsetToken.IntValue, (int)genToken.IntValue)
+                    ? XrefEntry.InUse(offsetToken.IntValue, CheckedGeneration(genToken.IntValue))
                     : XrefEntry.Free();
             }
         }
@@ -226,6 +268,11 @@ internal sealed class PdfFile : IDisposable
         int w0 = WidthAt(widths, 0);
         int w1 = WidthAt(widths, 1);
         int w2 = WidthAt(widths, 2);
+        if (w0 < 0 || w0 > Limits.MaxXrefFieldWidth || w1 < 0 || w1 > Limits.MaxXrefFieldWidth
+            || w2 < 0 || w2 > Limits.MaxXrefFieldWidth)
+        {
+            throw new PdfSyntaxException($"Cross-reference stream /W entries must each be 0..{Limits.MaxXrefFieldWidth}.");
+        }
         int recordLength = w0 + w1 + w2;
         if (recordLength <= 0) throw new PdfSyntaxException("Invalid /W widths in cross-reference stream.");
 
@@ -257,15 +304,16 @@ internal sealed class PdfFile : IDisposable
                 long field3 = ReadBigEndian(data, pos, w2);
                 pos += w2;
 
-                int objectNumber = (int)(startNumber + i);
+                int objectNumber = CheckedObjectNumber(startNumber + i);
                 if (entries.ContainsKey(objectNumber)) continue;
                 switch (type)
                 {
                     case 1:
-                        entries[objectNumber] = XrefEntry.InUse(field2, (int)field3);
+                        entries[objectNumber] = XrefEntry.InUse(field2, CheckedGeneration(field3));
                         break;
                     case 2:
-                        entries[objectNumber] = XrefEntry.Compressed(field2, (int)field3);
+                        // field3 is the index inside the object stream; out-of-range values resolve to null later.
+                        entries[objectNumber] = XrefEntry.Compressed(field2, field3 >= 0 && field3 <= int.MaxValue ? (int)field3 : -1);
                         break;
                     default:
                         entries[objectNumber] = XrefEntry.Free();
@@ -279,29 +327,101 @@ internal sealed class PdfFile : IDisposable
 
     private PdfObject LoadObjectAt(long offset)
     {
-        long endObj = _source.IndexOf(EndObjKeyword, offset);
-        long windowEnd = endObj >= 0 ? endObj + EndObjKeyword.Length : _source.Length;
-        int windowLength = (int)(windowEnd - offset);
-        if (windowLength <= 0) throw new PdfSyntaxException($"Cannot read object at offset {offset}.");
+        if (offset < 0 || offset >= _source.Length) throw new PdfSyntaxException($"Object offset {offset} is outside the file.");
 
-        byte[] window = _source.ReadBytes(offset, windowLength);
-        var lexer = new PdfLexer(window, 0, window.Length);
+        // Read a window that starts at 64 KiB and doubles, instead of reading up to the next 'endobj' or
+        // EOF. Many objects without 'endobj' would otherwise each read the rest of the file, which is
+        // quadratic in time and allocation (ADR-0010 §5.2 item 6).
+        long available = _source.Length - offset;
+        int windowLength = (int)Math.Min(Limits.InitialObjectWindow, available);
+        while (true)
+        {
+            byte[] window = _source.ReadBytes(offset, windowLength);
+            bool atEof = window.Length >= available;
+            int endObj = IndexOf(window, EndObjKeyword);
+            if (endObj >= 0 || atEof)
+            {
+                int end = endObj >= 0 ? endObj + EndObjKeyword.Length : window.Length;
+                return ParseIndirectObject(window, end, offset, requireComplete: false)!;
+            }
+
+            PdfObject? value = ParseIndirectObject(window, window.Length, offset, requireComplete: true);
+            if (value is not null) return value;
+
+            if (windowLength >= Limits.MaxObjectWindow)
+            {
+                throw new PdfSyntaxException($"Object at offset {offset} exceeds the {Limits.MaxObjectWindow / (1024 * 1024)} MiB window limit.");
+            }
+            windowLength = (int)Math.Min(Math.Min((long)windowLength * 2, Limits.MaxObjectWindow), available);
+        }
+    }
+
+    // Parses "n g obj value" from window[0..end). With requireComplete, returns null when the result could
+    // change if the window were wider: the parse ran into the window end, or the token after the value is
+    // cut off by it (e.g. "stream" or the "R" of a reference).
+    private PdfObject? ParseIndirectObject(byte[] window, int end, long offset, bool requireComplete)
+    {
+        var lexer = new PdfLexer(window, 0, end);
         Token number = lexer.Next();
         Token generation = lexer.Next();
         Token obj = lexer.Next();
         if (number.Type != TokenType.Integer || generation.Type != TokenType.Integer
             || obj.Type != TokenType.Keyword || obj.Text != "obj")
         {
+            if (requireComplete && obj.Type == TokenType.Eof) return null;
             throw new PdfSyntaxException($"Malformed indirect object header at offset {offset}.");
         }
 
-        PdfObject value = new PdfObjectParser(lexer).ParseValue();
-        int objectNumber = (int)number.IntValue;
+        int objectNumber = CheckedObjectNumber(number.IntValue);
+        int generationNumber = CheckedGeneration(generation.IntValue);
+
+        var parser = new PdfObjectParser(lexer);
+        PdfObject value;
+        try
+        {
+            value = parser.ParseValue();
+        }
+        catch (PdfSyntaxException) when (requireComplete && parser.ReachedEnd)
+        {
+            return null;
+        }
+
+        if (requireComplete)
+        {
+            if (parser.ReachedEnd) return null;
+            Token after = lexer.Next();
+            if (after.Type == TokenType.Eof || lexer.Position >= end) return null;
+        }
+
         if (_handler is not null && objectNumber != _encryptObjectNumber)
         {
-            value = DecryptObject(value, objectNumber, (int)generation.IntValue);
+            value = DecryptObject(value, objectNumber, generationNumber, 0);
         }
         return value;
+    }
+
+    private static int CheckedObjectNumber(long value)
+    {
+        if (value < 0 || value > int.MaxValue) throw new PdfSyntaxException("Object number is outside 0..2147483647.");
+        return (int)value;
+    }
+
+    private static int CheckedGeneration(long value)
+    {
+        if (value < 0 || value > int.MaxValue) throw new PdfSyntaxException("Generation number is outside 0..2147483647.");
+        return (int)value;
+    }
+
+    private static int IndexOf(byte[] buffer, byte[] pattern)
+    {
+        int last = buffer.Length - pattern.Length;
+        for (int i = 0; i <= last; i++)
+        {
+            int j = 0;
+            while (j < pattern.Length && buffer[i + j] == pattern[j]) j++;
+            if (j == pattern.Length) return i;
+        }
+        return -1;
     }
 
     private void SetupEncryption(string? password)
@@ -325,7 +445,6 @@ internal sealed class PdfFile : IDisposable
 
         int v = IntOf(enc, "V", 0);
         int r = IntOf(enc, "R", 0);
-        int lengthBits = IntOf(enc, "Length", 40);
         EncryptionAlgorithm algorithm = DetermineAlgorithm(enc, v, r);
 
         Algorithm = algorithm;
@@ -333,12 +452,33 @@ internal sealed class PdfFile : IDisposable
         Permissions = IntOf(enc, "P", 0);
         EncryptMetadata = !(enc["EncryptMetadata"] is PdfBoolean meta) || meta.Value;
 
-        int keyLengthBytes = algorithm == EncryptionAlgorithm.Aes256 ? 32 : lengthBits / 8;
+        // Strings and streams can use different crypt filters (/StrF, /StmF); "Identity" means "not encrypted".
+        EncryptionAlgorithm streamMethod = CryptMethod(enc, "StmF", v, r, algorithm);
+        EncryptionAlgorithm stringMethod = CryptMethod(enc, "StrF", v, r, algorithm);
+
+        int keyLengthBytes = algorithm == EncryptionAlgorithm.Aes256 ? 32 : KeyLengthBytes(enc, v, algorithm);
         _handler = new StandardSecurityHandler(
             algorithm, r, keyLengthBytes,
             StringBytes(enc, "O"), StringBytes(enc, "U"), StringBytes(enc, "OE"), StringBytes(enc, "UE"),
-            Permissions, FirstIdBytes(), EncryptMetadata, password);
+            Permissions, FirstIdBytes(), EncryptMetadata, password, streamMethod, stringMethod);
         Authentication = _handler.Authentication;
+    }
+
+    // The file-key length for revisions 2-4. Version 4 states it on the crypt filter (/CF/<StmF>/Length, which
+    // writers give either in bytes or in bits); otherwise the top-level /Length in bits applies. Without either,
+    // AESV2 implies a 128-bit key and RC4 the 40-bit default.
+    private int KeyLengthBytes(PdfDictionary enc, int v, EncryptionAlgorithm algorithm)
+    {
+        if (v == 4 && CryptFilter(enc, "StmF") is PdfDictionary filter && filter["Length"] is PdfNumber cfLength)
+        {
+            long value = cfLength.AsInt64;
+            return value >= 40 ? (int)Math.Min(value / 8, int.MaxValue) : (int)Math.Max(value, 0);
+        }
+        if (enc["Length"] is PdfNumber length)
+        {
+            return (int)Math.Max(Math.Min(length.AsInt64 / 8, int.MaxValue), 0);
+        }
+        return algorithm == EncryptionAlgorithm.Aes128 ? 16 : 5;
     }
 
     private EncryptionAlgorithm DetermineAlgorithm(PdfDictionary enc, int v, int r)
@@ -356,20 +496,43 @@ internal sealed class PdfFile : IDisposable
         return EncryptionAlgorithm.Rc4;
     }
 
-    private string CryptFilterMethod(PdfDictionary enc)
+    // The cipher one crypt filter applies, with None for the Identity filter and for /CFM /None.
+    private EncryptionAlgorithm CryptMethod(PdfDictionary enc, string key, int v, int r, EncryptionAlgorithm algorithm)
     {
-        string name = (enc["StmF"] as PdfName)?.Value ?? "StdCF";
-        if (Resolve(enc["CF"] ?? PdfNull.Instance) is PdfDictionary cf
-            && Resolve(cf[name] ?? PdfNull.Instance) is PdfDictionary filter
-            && filter["CFM"] is PdfName cfm)
+        if (v < 4) return algorithm;
+        if ((enc[key] as PdfName)?.Value == "Identity") return EncryptionAlgorithm.None;
+
+        string? cfm = (CryptFilter(enc, key)?["CFM"] as PdfName)?.Value;
+        switch (cfm)
         {
-            return cfm.Value;
+            case "None": return EncryptionAlgorithm.None;
+            case "AESV2": return v >= 5 || r >= 5 ? EncryptionAlgorithm.Aes256 : EncryptionAlgorithm.Aes128;
+            case "AESV3": return EncryptionAlgorithm.Aes256;
+            case "V2": return v >= 5 || r >= 5 ? EncryptionAlgorithm.Aes256 : EncryptionAlgorithm.Rc4;
+            default: return v >= 5 || r >= 5 ? EncryptionAlgorithm.Aes256 : EncryptionAlgorithm.Rc4;
         }
-        return "V2";
     }
 
-    private PdfObject DecryptObject(PdfObject value, int objectNumber, int generation)
+    private PdfDictionary? CryptFilter(PdfDictionary enc, string key)
     {
+        string name = (enc[key] as PdfName)?.Value ?? "StdCF";
+        return Resolve(enc["CF"] ?? PdfNull.Instance) is PdfDictionary cf
+            && Resolve(cf[name] ?? PdfNull.Instance) is PdfDictionary filter
+            ? filter
+            : null;
+    }
+
+    private string CryptFilterMethod(PdfDictionary enc)
+        => (CryptFilter(enc, "StmF")?["CFM"] as PdfName)?.Value ?? "V2";
+
+    private PdfObject DecryptObject(PdfObject value, int objectNumber, int generation, int depth)
+    {
+        // The parser bounds nesting already; the walk checks again so it never relies on that.
+        if (depth > Limits.MaxNestingDepth)
+        {
+            throw new PdfSyntaxException($"Object nesting exceeds the limit of {Limits.MaxNestingDepth} levels.");
+        }
+
         switch (value)
         {
             case PdfString s:
@@ -377,15 +540,20 @@ internal sealed class PdfFile : IDisposable
             case PdfArray a:
             {
                 var items = new List<PdfObject>(a.Count);
-                for (int i = 0; i < a.Count; i++) items.Add(DecryptObject(a[i], objectNumber, generation));
+                for (int i = 0; i < a.Count; i++) items.Add(DecryptObject(a[i], objectNumber, generation, depth + 1));
                 return new PdfArray(items);
             }
             case PdfDictionary d:
-                return DecryptDictionary(d, objectNumber, generation);
+                return DecryptDictionary(d, objectNumber, generation, depth + 1);
             case PdfStream stream:
             {
-                PdfDictionary dict = DecryptDictionary(stream.Dictionary, objectNumber, generation);
-                byte[] raw = _handler!.DecryptStream(stream.GetRawBytes(), objectNumber, generation);
+                PdfDictionary dict = DecryptDictionary(stream.Dictionary, objectNumber, generation, depth + 1);
+                string? type = (stream.Dictionary["Type"] as PdfName)?.Value;
+
+                // Cross-reference streams are never encrypted, and with /EncryptMetadata false neither is
+                // the document metadata stream (ISO 32000-2 §7.5.8.2, §7.6.3.1).
+                bool plain = type == "XRef" || (type == "Metadata" && !EncryptMetadata);
+                byte[] raw = plain ? stream.GetRawBytes() : _handler!.DecryptStream(stream.GetRawBytes(), objectNumber, generation);
                 return new PdfStream(dict, raw);
             }
             default:
@@ -393,13 +561,13 @@ internal sealed class PdfFile : IDisposable
         }
     }
 
-    private PdfDictionary DecryptDictionary(PdfDictionary dictionary, int objectNumber, int generation)
+    private PdfDictionary DecryptDictionary(PdfDictionary dictionary, int objectNumber, int generation, int depth)
     {
         var map = new Dictionary<string, PdfObject>(StringComparer.Ordinal);
         foreach (string key in dictionary.Keys)
         {
             PdfObject? entry = dictionary[key];
-            if (entry is not null) map[key] = DecryptObject(entry, objectNumber, generation);
+            if (entry is not null) map[key] = DecryptObject(entry, objectNumber, generation, depth);
         }
         return new PdfDictionary(map);
     }
@@ -418,25 +586,32 @@ internal sealed class PdfFile : IDisposable
         ObjStmData? data = GetObjectStream(objectStreamNumber);
         if (data is null || index < 0 || index >= data.Entries.Length) return PdfNull.Instance;
 
-        int start = data.First + data.Entries[index].Offset;
+        long start = (long)data.First + data.Entries[index].Offset;
         if (start < 0 || start > data.Bytes.Length) return PdfNull.Instance;
-        return new PdfObjectParser(data.Bytes, start, data.Bytes.Length).ParseValue();
+        return new PdfObjectParser(data.Bytes, (int)start, data.Bytes.Length).ParseValue();
     }
 
     private ObjStmData? GetObjectStream(int objectStreamNumber)
     {
         if (_objectStreamCache.TryGetValue(objectStreamNumber, out var cached)) return cached;
 
+        // An object stream must itself be an ordinary (type 1) object (ISO 32000-2 §7.5.7), so one object
+        // stream can never be loaded through another; this also rules out chains and cycles of them.
         ObjStmData? data = null;
-        if (GetObject(objectStreamNumber) is PdfStream stream)
+        if (_xref!.TryGetValue(objectStreamNumber, out var entry) && entry.Type == XrefEntryType.InUse
+            && GetObject(objectStreamNumber) is PdfStream stream)
         {
             byte[] decoded = StreamDecoder.Decode(stream);
-            int count = (int)(GetIntOrNull(stream.Dictionary, "N") ?? 0);
-            int first = (int)(GetIntOrNull(stream.Dictionary, "First") ?? 0);
+            long count = GetIntOrNull(stream.Dictionary, "N") ?? 0;
+            long first = GetIntOrNull(stream.Dictionary, "First") ?? 0;
 
-            var headerLexer = new PdfLexer(decoded, 0, Math.Min(first, decoded.Length));
-            var entries = new ObjStmEntry[count];
-            for (int i = 0; i < count; i++)
+            // Each header entry takes at least two digits and two separators, so /N cannot exceed the header size.
+            if (count < 0 || count > decoded.Length) throw new PdfSyntaxException("Object stream /N is out of range.");
+            if (first < 0 || first > decoded.Length) throw new PdfSyntaxException("Object stream /First is out of range.");
+
+            var headerLexer = new PdfLexer(decoded, 0, (int)first);
+            var entries = new List<ObjStmEntry>();
+            for (long i = 0; i < count; i++)
             {
                 Token num = headerLexer.Next();
                 Token off = headerLexer.Next();
@@ -444,17 +619,20 @@ internal sealed class PdfFile : IDisposable
                 {
                     throw new PdfSyntaxException("Malformed object stream header.");
                 }
-                entries[i] = new ObjStmEntry((int)num.IntValue, (int)off.IntValue);
+                if (off.IntValue < 0 || off.IntValue > decoded.Length) throw new PdfSyntaxException("Object stream offset is out of range.");
+                entries.Add(new ObjStmEntry(CheckedObjectNumber(num.IntValue), (int)off.IntValue));
             }
 
-            data = new ObjStmData(decoded, first, entries);
+            data = new ObjStmData(decoded, (int)first, entries.ToArray());
         }
 
         _objectStreamCache[objectStreamNumber] = data;
         return data;
     }
 
-    private static int WidthAt(PdfArray widths, int i) => widths[i] is PdfInteger v ? (int)v.Value : 0;
+    // Values outside the int range map to -1 so that the /W range check rejects them instead of truncating.
+    private static int WidthAt(PdfArray widths, int i)
+        => widths[i] is PdfInteger v ? (v.Value < 0 || v.Value > int.MaxValue ? -1 : (int)v.Value) : 0;
 
     private static long AsLong(PdfObject value) => value is PdfInteger v ? v.Value : 0L;
 

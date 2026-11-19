@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using ZeroDep.Abstractions;
 using ZeroDep.Lexing;
 using ZeroDep.Objects;
 
@@ -64,6 +65,7 @@ internal sealed class FontInfo
 
         if (resolve(dict["ToUnicode"] ?? PdfNull.Instance) is PdfStream toUnicodeStream)
         {
+            // A map that is malformed or exceeds Limits.MaxCMapEntries is dropped (decoding then falls back).
             try { _toUnicode = ToUnicodeCMap.Parse(decode(toUnicodeStream)); }
             catch { _toUnicode = null; }
         }
@@ -76,20 +78,28 @@ internal sealed class FontInfo
                 && resolve(descendants[0]) is PdfDictionary cidFont)
             {
                 if (resolve(cidFont["DW"] ?? PdfNull.Instance) is PdfNumber dw) _defaultWidth = dw.AsDouble;
-                if (resolve(cidFont["W"] ?? PdfNull.Instance) is PdfArray w) _cidWidths = ParseCidWidths(resolve, w);
+                if (resolve(cidFont["W"] ?? PdfNull.Instance) is PdfArray w)
+                {
+                    // A /W array that exceeds Limits.MaxCMapEntries is dropped (widths fall back to /DW).
+                    try { _cidWidths = ParseCidWidths(resolve, w); }
+                    catch (PdfSyntaxException) { _cidWidths = null; }
+                }
             }
         }
         else
         {
             _defaultWidth = 500;
-            _firstChar = resolve(dict["FirstChar"] ?? PdfNull.Instance) is PdfNumber fc ? (int)fc.AsInt64 : 0;
+            // FirstChar is a byte code; clamp before the int cast so NaN or huge values cannot wrap.
+            _firstChar = resolve(dict["FirstChar"] ?? PdfNull.Instance) is PdfNumber fc && !double.IsNaN(fc.AsDouble)
+                ? (int)Math.Max(-65536.0, Math.Min(65536.0, fc.AsDouble))
+                : 0;
 
             // FontDescriptor /Flags: Symbolic (bit 3 = 4) without Nonsymbolic (bit 6 = 32). A symbolic font's
             // codes index a custom built-in encoding, so a blind WinAnsi guess is unreliable (ADR-0007).
             if (resolve(dict["FontDescriptor"] ?? PdfNull.Instance) is PdfDictionary descriptor
                 && resolve(descriptor["Flags"] ?? PdfNull.Instance) is PdfNumber flagsNum)
             {
-                int flags = (int)flagsNum.AsInt64;
+                long flags = flagsNum.AsInt64;
                 _symbolic = (flags & 4) != 0 && (flags & 32) == 0;
             }
             if (resolve(dict["Widths"] ?? PdfNull.Instance) is PdfArray widths)
@@ -126,7 +136,7 @@ internal sealed class FontInfo
                     int code = 0;
                     foreach (PdfObject item in differences.Items)
                     {
-                        if (item is PdfInteger n) code = (int)n.Value;
+                        if (item is PdfInteger n) code = n.Value >= 0 && n.Value <= 255 ? (int)n.Value : 256;
                         else if (item is PdfName name) _differences[code++] = GlyphList.ToUnicode(name.Value);
                     }
                 }
@@ -138,6 +148,9 @@ internal sealed class FontInfo
 
         SpaceWidthEm = ComputeSpaceWidthEm();
     }
+
+    /// <summary>Entries in the font's /ToUnicode and /W maps, for the caller's work budget.</summary>
+    public long MapEntryCount => (long)(_toUnicode?.Count ?? 0) + (_cidWidths?.Count ?? 0);
 
     /// <summary>
     /// The advance width of the space character in em (1.0 = full em), used to detect inter-word gaps that
@@ -246,9 +259,24 @@ internal sealed class FontInfo
         return _defaultWidth;
     }
 
+    // CIDs are 0..65535; entries outside are ignored. Every entry written, including overwrites, counts
+    // toward Limits.MaxCMapEntries, so repeated ranges cannot multiply the work.
     private static Dictionary<int, double> ParseCidWidths(Func<PdfObject, PdfObject> resolve, PdfArray w)
     {
+        const long MaxCid = 0xFFFF;
         var map = new Dictionary<int, double>();
+        long entries = 0;
+
+        void Put(long cid, double width)
+        {
+            if (++entries > Limits.MaxCMapEntries)
+            {
+                throw new PdfSyntaxException($"Font /W array exceeds the limit of {Limits.MaxCMapEntries} entries.");
+            }
+
+            if (cid >= 0 && cid <= MaxCid) map[(int)cid] = width;
+        }
+
         int i = 0;
         while (i < w.Count)
         {
@@ -258,18 +286,21 @@ internal sealed class FontInfo
             PdfObject next = resolve(w[i + 1]);
             if (next is PdfArray array)
             {
-                int c = (int)first.AsInt64;
+                long c = first.AsInt64;
                 for (int j = 0; j < array.Count; j++)
                 {
-                    if (resolve(array[j]) is PdfNumber wn) map[c + j] = wn.AsDouble;
+                    if (resolve(array[j]) is PdfNumber wn) Put(c + j, wn.AsDouble);
                 }
                 i += 2;
             }
             else if (next is PdfNumber last && i + 2 < w.Count && resolve(w[i + 2]) is PdfNumber value)
             {
-                for (int c = (int)first.AsInt64; c <= (int)last.AsInt64 && c - (int)first.AsInt64 < 70000; c++)
+                // Clip the range to the CID space before iterating.
+                long lo = Math.Max(first.AsInt64, 0);
+                long hi = Math.Min(last.AsInt64, MaxCid);
+                for (long c = lo; c <= hi; c++)
                 {
-                    map[c] = value.AsDouble;
+                    Put(c, value.AsDouble);
                 }
                 i += 3;
             }
@@ -324,9 +355,13 @@ internal sealed class FontInfo
 /// <summary>Parses a /ToUnicode CMap (bfchar/bfrange) into a code → Unicode map (ISO 32000-2 §9.10.3).</summary>
 internal static class ToUnicodeCMap
 {
+    /// <summary>
+    /// Parses the map. Throws <see cref="PdfSyntaxException"/> when it writes more than
+    /// <see cref="Limits.MaxCMapEntries"/> entries (overwrites included).
+    /// </summary>
     public static Dictionary<int, string> Parse(byte[] data)
     {
-        var map = new Dictionary<int, string>();
+        var map = new CountedMap();
         var lexer = new PdfLexer(data, 0, data.Length);
         while (true)
         {
@@ -336,10 +371,31 @@ internal static class ToUnicodeCMap
             if (token.Text == "beginbfchar") ParseBfChar(lexer, map);
             else if (token.Text == "beginbfrange") ParseBfRange(lexer, map);
         }
-        return map;
+        return map.Map;
     }
 
-    private static void ParseBfChar(PdfLexer lexer, Dictionary<int, string> map)
+    // Counts every write so that the total, not only the distinct codes, is bounded.
+    private sealed class CountedMap
+    {
+        private long _writes;
+
+        public Dictionary<int, string> Map { get; } = new Dictionary<int, string>();
+
+        public string this[int code]
+        {
+            set
+            {
+                if (++_writes > Limits.MaxCMapEntries)
+                {
+                    throw new PdfSyntaxException($"ToUnicode CMap exceeds the limit of {Limits.MaxCMapEntries} entries.");
+                }
+
+                Map[code] = value;
+            }
+        }
+    }
+
+    private static void ParseBfChar(PdfLexer lexer, CountedMap map)
     {
         while (true)
         {
@@ -351,7 +407,7 @@ internal static class ToUnicodeCMap
         }
     }
 
-    private static void ParseBfRange(PdfLexer lexer, Dictionary<int, string> map)
+    private static void ParseBfRange(PdfLexer lexer, CountedMap map)
     {
         while (true)
         {

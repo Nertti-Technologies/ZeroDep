@@ -48,6 +48,7 @@ public static partial class JpegDecoder
         }
 
         int restartInterval = meta.RestartInterval;
+        int scans = 0;
 
         int pos = 2;
         while (pos + 1 < data.Length)
@@ -102,6 +103,12 @@ public static partial class JpegDecoder
             }
             else if (marker == 0xDA)
             {
+                // Each scan may visit every block, so the scan count bounds the decode work.
+                if (++scans > Limits.MaxProgressiveJpegScans)
+                {
+                    break;
+                }
+
                 int ns = data[segStart];
                 var scanComp = new int[ns];
                 var dcId = new int[ns];
@@ -143,6 +150,7 @@ public static partial class JpegDecoder
         var planes = new byte[n][];
         var block = new byte[64];
         var work = new int[64];
+        var idctScratch = new double[64];
 
         for (int c = 0; c < n; c++)
         {
@@ -168,7 +176,7 @@ public static partial class JpegDecoder
                         work[i] = coef[c][bo + i] * quantNatural[i];
                     }
 
-                    InverseDct(work, block);
+                    InverseDct(work, block, idctScratch);
                     PlaceBlock(planes[c], planeW[c], bx * 8, by * 8, block);
                 }
             }
@@ -198,16 +206,21 @@ public static partial class JpegDecoder
                 for (int bx = 0; bx < bw; bx++)
                 {
                     int bo = ((by * blocksPerLine[c]) + bx) * 64;
-                    if (dcScan)
+
+                    // Without remaining entropy bits a block can only stay as it is (zero correction
+                    // bits, or an end-of-band run), so it is skipped until the next restart marker.
+                    bool skip = reader.Exhausted;
+                    if (skip)
                     {
-                        if (ah == 0)
-                        {
-                            DecodeDcFirst(reader, dc!, coef[c], bo, al, ref pred[c]);
-                        }
-                        else
-                        {
-                            DecodeDcRefine(reader, coef[c], bo, al);
-                        }
+                        // nothing to decode
+                    }
+                    else if (dcScan && ah == 0)
+                    {
+                        DecodeDcFirst(reader, dc!, coef[c], bo, al, ref pred[c]);
+                    }
+                    else if (dcScan)
+                    {
+                        DecodeDcRefine(reader, coef[c], bo, al);
                     }
                     else if (ah == 0)
                     {
@@ -248,6 +261,11 @@ public static partial class JpegDecoder
                             int blockRow = (my * comp.VerticalSampling) + by;
                             int blockCol = (mx * comp.HorizontalSampling) + bx;
                             int bo = ((blockRow * blocksPerLine[c]) + blockCol) * 64;
+                            if (reader.Exhausted)
+                            {
+                                continue; // no entropy bits left before the next marker
+                            }
+
                             if (ah == 0)
                             {
                                 DecodeDcFirst(reader, dc, coef[c], bo, al, ref pred[c]);

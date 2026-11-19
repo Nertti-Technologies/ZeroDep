@@ -44,5 +44,8 @@ foreach (var run in withOcr.TextRuns)
 
 - `TesseractEngine` is **not thread-safe**; this adapter serializes calls internally. For throughput,
   create one engine per worker.
-- The decoded image is wrapped in an in-memory BMP before recognition (no temp files).
+- The decoded image is wrapped in a BMP and passed to `tesseract` through a temporary file that only
+  the current user can read (inside a private temporary directory); it is deleted after each run.
+- Each run has an internal time limit; a run that exceeds it has its process tree killed and fails
+  with `InvalidOperationException`, like any other OCR failure.
 - Confidence is reported per line (0–1); set `OcrOptions.MinConfidence` to drop low-confidence lines.

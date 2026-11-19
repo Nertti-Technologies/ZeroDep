@@ -1,3 +1,4 @@
+using System;
 using ZeroDep.Ocr;
 
 namespace ZeroDep.Ocr.Tesseract;
@@ -8,13 +9,25 @@ namespace ZeroDep.Ocr.Tesseract;
 /// </summary>
 internal static class Bmp
 {
+    /// <summary>Encodes the image; throws <see cref="ArgumentException"/> when its size is negative or too large for a BMP array.</summary>
     public static byte[] Encode(DecodedImage image)
     {
         int w = image.Width;
         int h = image.Height;
-        int rowSize = (((w * 3) + 3) / 4) * 4;          // rows padded to a 4-byte boundary
-        int dataSize = rowSize * h;
-        int fileSize = 54 + dataSize;
+        if (w < 0 || h < 0)
+        {
+            throw new ArgumentException($"Image dimensions {w}x{h} are negative.", nameof(image));
+        }
+
+        // Sizes are computed in long so a large width or height cannot wrap; the result must fit one array.
+        long rowSize = (((w * 3L) + 3) / 4) * 4;        // rows padded to a 4-byte boundary
+        long dataSize = rowSize * h;
+        if (54 + dataSize > Array.MaxLength)
+        {
+            throw new ArgumentException($"Image {w}x{h} is too large to encode as a BMP.", nameof(image));
+        }
+
+        int fileSize = (int)(54 + dataSize);
 
         var bmp = new byte[fileSize];
 
@@ -30,7 +43,7 @@ internal static class Bmp
         WriteInt32(bmp, 22, h);
         bmp[26] = 1;                                     // planes
         bmp[28] = 24;                                    // bits per pixel
-        WriteInt32(bmp, 34, dataSize);
+        WriteInt32(bmp, 34, (int)dataSize);
 
         byte[] src = image.Pixels;
         bool gray = image.Format == PixelFormat.Gray8;
@@ -38,10 +51,10 @@ internal static class Bmp
 
         for (int y = 0; y < h; y++)
         {
-            int dstRow = 54 + ((h - 1 - y) * rowSize);   // BMP rows are bottom-to-top
+            int dstRow = 54 + ((h - 1 - y) * (int)rowSize);   // BMP rows are bottom-to-top
             for (int x = 0; x < w; x++)
             {
-                int si = ((y * w) + x) * channels;
+                long si = (((long)y * w) + x) * channels;
                 byte r, g, b;
                 if (gray)
                 {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace ZeroDep.Filters;
 
@@ -27,6 +28,8 @@ public static class CcittFaxDecode
     /// <summary>Decodes a CCITT-encoded stream into a bi-level raster.</summary>
     /// <param name="data">The raw CCITT-encoded bytes.</param>
     /// <param name="parms">Decode parameters from the image's <c>/DecodeParms</c>.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> or <paramref name="parms"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The image would exceed the pixel limit, or the data is malformed.</exception>
     public static RasterImage Decode(byte[] data, CcittParams parms)
     {
         if (data is null)
@@ -39,8 +42,21 @@ public static class CcittFaxDecode
             throw new ArgumentNullException(nameof(parms));
         }
 
+        return DecoderBoundary.Run(() => DecodeCore(data, parms), "CCITTFaxDecode");
+    }
+
+    private static RasterImage DecodeCore(byte[] data, CcittParams parms)
+    {
         int columns = parms.Columns > 0 ? parms.Columns : 1728;
         int maxRows = parms.Rows > 0 ? parms.Rows : int.MaxValue;
+
+        // A row can cost as little as one bit (V0 on an all-white line), so without /Rows the row count is
+        // bounded only by the pixel limit: rows x columns may not exceed it.
+        long rowLimit = Limits.MaxImagePixels / columns;
+        if (parms.Rows > rowLimit)
+        {
+            throw new InvalidDataException($"CCITT image of {columns}x{parms.Rows} exceeds the {Limits.MaxImagePixels} pixel limit.");
+        }
 
         var reader = new BitReader(data);
         var rows = new List<int[]>();      // each row stored as its changing-element positions
@@ -93,6 +109,11 @@ public static class CcittFaxDecode
             if (coding is null)
             {
                 break; // EOFB / RTC / end of data
+            }
+
+            if (rows.Count >= rowLimit)
+            {
+                throw new InvalidDataException($"CCITT image of {columns} columns exceeds the {Limits.MaxImagePixels} pixel limit.");
             }
 
             rows.Add(coding);
@@ -315,7 +336,8 @@ public static class CcittFaxDecode
                 return -1;
             }
 
-            total += run;
+            // Make-up codes may repeat; saturate rather than overflow (callers clamp runs to the row width).
+            total = (int)Math.Min((long)total + run, int.MaxValue / 2);
             if (run < 64)
             {
                 return total; // terminating code

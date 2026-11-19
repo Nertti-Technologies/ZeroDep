@@ -30,17 +30,25 @@ internal sealed class StandardSecurityHandler
     private readonly int _permissions;
     private readonly byte[] _idFirst;
     private readonly bool _encryptMetadata;
+    private readonly EncryptionAlgorithm _streamMethod;
+    private readonly EncryptionAlgorithm _stringMethod;
 
     private byte[]? _fileKey;
 
+    // streamMethod / stringMethod: the ciphers of the /StmF and /StrF crypt filters (None for Identity);
+    // both default to algorithm. Throws PdfSyntaxException when a parameter breaks an ISO 32000-2
+    // invariant (key length, /UE, /OE).
     public StandardSecurityHandler(
         EncryptionAlgorithm algorithm, int revision, int keyLengthBytes,
         byte[] o, byte[] u, byte[] oe, byte[] ue, int permissions, byte[] idFirst,
-        bool encryptMetadata, string? password)
+        bool encryptMetadata, string? password,
+        EncryptionAlgorithm? streamMethod = null, EncryptionAlgorithm? stringMethod = null)
     {
         Algorithm = algorithm;
         _revision = revision;
-        _keyLengthBytes = keyLengthBytes <= 0 ? 5 : keyLengthBytes;
+        _streamMethod = streamMethod ?? algorithm;
+        _stringMethod = stringMethod ?? algorithm;
+        _keyLengthBytes = LegacyKeyLength(revision, keyLengthBytes, _streamMethod, _stringMethod);
         _o = o;
         _u = u;
         _oe = oe;
@@ -54,6 +62,20 @@ internal sealed class StandardSecurityHandler
     /// <summary>The cipher in effect.</summary>
     public EncryptionAlgorithm Algorithm { get; }
 
+    // The file-key length for revisions 2-4: 5..16 bytes (ISO 32000-2 §7.6.3.2), and 16 whenever AES-128
+    // is in use, since AESV2 always takes a 128-bit key. Revision 2 always uses 5 bytes.
+    private static int LegacyKeyLength(int revision, int keyLengthBytes, EncryptionAlgorithm streamMethod, EncryptionAlgorithm stringMethod)
+    {
+        if (revision >= 5) return 32;
+        if (streamMethod == EncryptionAlgorithm.Aes128 || stringMethod == EncryptionAlgorithm.Aes128) return 16;
+        if (keyLengthBytes <= 0) return 5;
+        if (keyLengthBytes < 5 || keyLengthBytes > 16)
+        {
+            throw new PdfSyntaxException($"RC4 key length of {keyLengthBytes} bytes is outside 5..16.");
+        }
+        return keyLengthBytes;
+    }
+
     /// <summary>The security-handler revision.</summary>
     public int Revision => _revision;
 
@@ -61,27 +83,27 @@ internal sealed class StandardSecurityHandler
     public AuthenticationResult Authentication { get; }
 
     /// <summary>Decrypts a stream's raw bytes for the given object number/generation.</summary>
-    public byte[] DecryptStream(byte[] data, int objectNumber, int generation) => Decrypt(data, objectNumber, generation);
+    public byte[] DecryptStream(byte[] data, int objectNumber, int generation) => Decrypt(_streamMethod, data, objectNumber, generation);
 
     /// <summary>Decrypts a string's bytes for the given object number/generation.</summary>
-    public byte[] DecryptString(byte[] data, int objectNumber, int generation) => Decrypt(data, objectNumber, generation);
+    public byte[] DecryptString(byte[] data, int objectNumber, int generation) => Decrypt(_stringMethod, data, objectNumber, generation);
 
-    private byte[] Decrypt(byte[] data, int objectNumber, int generation)
+    private byte[] Decrypt(EncryptionAlgorithm method, byte[] data, int objectNumber, int generation)
     {
-        if (_fileKey is null || data.Length == 0) return data;
+        if (_fileKey is null || data.Length == 0 || method == EncryptionAlgorithm.None) return data;
 
-        if (Algorithm == EncryptionAlgorithm.Aes256)
+        if (method == EncryptionAlgorithm.Aes256)
         {
-            return AesCipher.DecryptWithIvPrefix(_fileKey, data);
+            return _fileKey.Length == 32 ? AesCipher.DecryptWithIvPrefix(_fileKey, data) : Array.Empty<byte>();
         }
 
-        byte[] objectKey = ObjectKey(objectNumber, generation);
-        return Algorithm == EncryptionAlgorithm.Aes128
+        byte[] objectKey = ObjectKey(method, objectNumber, generation);
+        return method == EncryptionAlgorithm.Aes128
             ? AesCipher.DecryptWithIvPrefix(objectKey, data)
             : Rc4.Transform(objectKey, data);
     }
 
-    private byte[] ObjectKey(int objectNumber, int generation)
+    private byte[] ObjectKey(EncryptionAlgorithm method, int objectNumber, int generation)
     {
         using var md5 = MD5.Create();
         using var ms = new MemoryStream();
@@ -91,7 +113,7 @@ internal sealed class StandardSecurityHandler
         ms.WriteByte((byte)((objectNumber >> 16) & 0xFF));
         ms.WriteByte((byte)(generation & 0xFF));
         ms.WriteByte((byte)((generation >> 8) & 0xFF));
-        if (Algorithm == EncryptionAlgorithm.Aes128) ms.Write(Salt, 0, Salt.Length);
+        if (method == EncryptionAlgorithm.Aes128) ms.Write(Salt, 0, Salt.Length);
 
         byte[] hash = md5.ComputeHash(ms.ToArray());
         int n = Math.Min(_fileKey!.Length + 5, 16);
@@ -202,7 +224,7 @@ internal sealed class StandardSecurityHandler
             if (FirstBytesEqual(Hash2B(pw, uValidationSalt, Array.Empty<byte>()), uHash, 32))
             {
                 byte[] intermediate = Hash2B(pw, uKeySalt, Array.Empty<byte>());
-                _fileKey = AesCipher.DecryptNoPadding(intermediate, new byte[16], _ue);
+                _fileKey = AesCipher.DecryptNoPadding(intermediate, new byte[16], Require32(_ue, "UE"));
                 return AuthenticationResult.UserPassword;
             }
         }
@@ -216,7 +238,7 @@ internal sealed class StandardSecurityHandler
             if (FirstBytesEqual(Hash2B(pw, oValidationSalt, u48), oHash, 32))
             {
                 byte[] intermediate = Hash2B(pw, oKeySalt, u48);
-                _fileKey = AesCipher.DecryptNoPadding(intermediate, new byte[16], _oe);
+                _fileKey = AesCipher.DecryptNoPadding(intermediate, new byte[16], Require32(_oe, "OE"));
                 return AuthenticationResult.OwnerPassword;
             }
         }
@@ -261,6 +283,13 @@ internal sealed class StandardSecurityHandler
     }
 
     // ---- helpers ----
+
+    // /UE and /OE hold the AES-256 file key wrapped without padding, so they are exactly 32 bytes (ISO 32000-2 §7.6.4.4).
+    private static byte[] Require32(byte[] value, string name)
+    {
+        if (value.Length != 32) throw new PdfSyntaxException($"/{name} must be 32 bytes, not {value.Length}.");
+        return value;
+    }
 
     private static byte[] Pad(byte[] pw)
     {

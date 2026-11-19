@@ -45,5 +45,7 @@
     <Project Path="tests/ZeroDep.Json.Tests/ZeroDep.Json.Tests.csproj" />
     <Project Path="tests/ZeroDep.Batch.Tests/ZeroDep.Batch.Tests.csproj" />
     <Project Path="tests/ZeroDep.Ocr.Tests/ZeroDep.Ocr.Tests.csproj" />
+    <Project Path="tests/ZeroDep.Ocr.Tesseract.Tests/ZeroDep.Ocr.Tesseract.Tests.csproj" />
+    <Project Path="tests/ZeroDep.Ocr.Paddle.Tests/ZeroDep.Ocr.Paddle.Tests.csproj" />
   </Folder>
 </Solution>

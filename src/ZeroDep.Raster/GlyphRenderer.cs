@@ -15,6 +15,9 @@ public static class GlyphRenderer
     /// <param name="glyphId">The glyph id.</param>
     /// <param name="pixelSize">The target em size in pixels.</param>
     /// <param name="hinted">If true and supported, grid-fit the outline before rasterizing.</param>
+    /// <exception cref="System.IO.InvalidDataException">
+    /// The glyph's bitmap would exceed the fixed size or work limits, or its outline has non-finite coordinates.
+    /// </exception>
     public static GlyphBitmap Render(FontProgram font, int glyphId, double pixelSize, bool hinted = false)
     {
         if (font is null)
@@ -22,14 +25,16 @@ public static class GlyphRenderer
             throw new ArgumentNullException(nameof(font));
         }
 
-        if (pixelSize <= 0)
+        if (!(pixelSize > 0) || double.IsInfinity(pixelSize))
         {
-            return GlyphBitmap.Empty;
+            return GlyphBitmap.Empty; // NaN, infinite, zero or negative size draws nothing
         }
 
         if (hinted)
         {
-            int ppem = (int)Math.Round(pixelSize);
+            // TrueType ppem is 16-bit; clamp before the int conversion.
+            double rounded = Math.Round(pixelSize);
+            int ppem = rounded >= ushort.MaxValue ? ushort.MaxValue : (int)rounded;
             if (ppem <= 0)
             {
                 ppem = 1;

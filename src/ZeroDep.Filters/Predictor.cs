@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 
 namespace ZeroDep.Filters;
 
@@ -9,23 +10,47 @@ namespace ZeroDep.Filters;
 internal static class Predictor
 {
     /// <summary>Reverses the predictor on <paramref name="data"/>; predictor &lt; 2 returns the data unchanged.</summary>
+    /// <exception cref="InvalidDataException">The predictor parameters are outside ISO 32000-2 Table 8.</exception>
     public static byte[] Apply(byte[] data, int predictor, int colors, int bitsPerComponent, int columns)
     {
-        if (predictor < 2 || data.Length == 0) return data;
+        if (predictor < 2) return data;
+        Validate(predictor, colors, bitsPerComponent, columns);
+        if (data.Length == 0) return data;
 
         int bytesPerPixel = Math.Max(1, (colors * bitsPerComponent + 7) / 8);
-        int rowLength = (colors * bitsPerComponent * columns + 7) / 8;
-        if (rowLength <= 0) return data;
+        long rowBits = (long)colors * bitsPerComponent * columns;
+        if (rowBits > (long)int.MaxValue * 8) throw new InvalidDataException("Predictor row length is out of range.");
+        int rowLength = (int)((rowBits + 7) / 8);
 
         return predictor == 2
             ? ApplyTiff(data, colors, bitsPerComponent, rowLength)
             : ApplyPng(data, bytesPerPixel, rowLength);
     }
 
+    // ISO 32000-2 Table 8: Predictor 2 (TIFF) or 10..15 (PNG); BitsPerComponent 1, 2, 4, 8 or 16;
+    // Colors and Columns at least 1.
+    private static void Validate(int predictor, int colors, int bitsPerComponent, int columns)
+    {
+        if (predictor != 2 && (predictor < 10 || predictor > 15))
+        {
+            throw new InvalidDataException($"Unsupported /Predictor {predictor}.");
+        }
+        if (colors < 1 || colors > Limits.MaxPredictorColors)
+        {
+            throw new InvalidDataException($"Predictor /Colors {colors} is outside 1..{Limits.MaxPredictorColors}.");
+        }
+        if (bitsPerComponent != 1 && bitsPerComponent != 2 && bitsPerComponent != 4 && bitsPerComponent != 8 && bitsPerComponent != 16)
+        {
+            throw new InvalidDataException($"Predictor /BitsPerComponent {bitsPerComponent} is not 1, 2, 4, 8 or 16.");
+        }
+        if (columns < 1) throw new InvalidDataException($"Predictor /Columns {columns} is below 1.");
+    }
+
     private static byte[] ApplyPng(byte[] data, int bytesPerPixel, int stride)
     {
         // Each PNG-predicted row is prefixed with a one-byte filter type.
-        int rows = data.Length / (stride + 1);
+        int rows = (int)(data.Length / ((long)stride + 1));
+        if (rows == 0) return Array.Empty<byte>();
         var output = new byte[rows * stride];
         var previous = new byte[stride];
 

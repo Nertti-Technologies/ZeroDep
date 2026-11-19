@@ -14,8 +14,6 @@ namespace ZeroDep.Fonts;
 /// </summary>
 public sealed class CffFont
 {
-    private const int MaxSubrDepth = 10;
-
     private readonly byte[] _data;
     private readonly CffIndex _charStrings;
     private readonly CffIndex _globalSubrs;
@@ -79,6 +77,7 @@ public sealed class CffFont
 
     /// <summary>Parses a CFF program (bare CFF, or the <c>CFF </c> table of an 'OTTO' OpenType font).</summary>
     /// <param name="input">The CFF/OpenType bytes.</param>
+    /// <exception cref="NotSupportedException">The program is malformed.</exception>
     public static CffFont Load(byte[] input)
     {
         if (input is null)
@@ -86,6 +85,11 @@ public sealed class CffFont
             throw new ArgumentNullException(nameof(input));
         }
 
+        return FontFault.Guard(() => LoadCore(input));
+    }
+
+    private static CffFont LoadCore(byte[] input)
+    {
         byte[] data = UnwrapOpenType(input);
         int hdrSize = data.Length > 2 ? data[2] : 4;
 
@@ -95,16 +99,21 @@ public sealed class CffFont
         pos = CffIndex.Read(data, pos, out _);                 // String INDEX
         CffIndex.Read(data, pos, out CffIndex globalSubrs);    // Global Subr INDEX
 
+        if (topDicts.Count == 0)
+        {
+            throw new NotSupportedException("CFF font has no Top DICT.");
+        }
+
         (int ts, int tl) = topDicts.Item(0);
         Dictionary<int, double[]> top = ParseDict(data, ts, ts + tl);
 
-        int charStringsOff = top.TryGetValue(17, out double[]? cs) && cs.Length > 0 ? (int)cs[0] : 0;
+        int charStringsOff = top.TryGetValue(17, out double[]? cs) && cs.Length > 0 ? ToInt(cs[0]) : 0;
         CffIndex.Read(data, charStringsOff, out CffIndex charStrings);
 
         int unitsPerEm = 1000;
         if (top.TryGetValue(1207, out double[]? matrix) && matrix.Length > 0 && matrix[0] != 0)
         {
-            unitsPerEm = (int)Math.Round(1.0 / matrix[0]);
+            unitsPerEm = FontFault.SanitizeUnitsPerEm(Math.Round(1.0 / matrix[0]));
         }
 
         bool isCid = top.ContainsKey(1230); // ROS
@@ -119,7 +128,7 @@ public sealed class CffFont
         var fd = new FontDict();
         if (top.TryGetValue(18, out double[]? priv) && priv.Length >= 2)
         {
-            FillPrivate(data, (int)priv[1], (int)priv[0], fd);
+            FillPrivate(data, ToInt(priv[1]), ToInt(priv[0]), fd);
         }
 
         return new CffFont(data, charStrings, globalSubrs, new[] { fd }, null, null, unitsPerEm, false);
@@ -127,12 +136,12 @@ public sealed class CffFont
 
     private static void FillPrivate(byte[] data, int privOff, int privSize, FontDict fd)
     {
-        Dictionary<int, double[]> pd = ParseDict(data, privOff, privOff + privSize);
+        Dictionary<int, double[]> pd = ParseDict(data, privOff, (int)Math.Min(int.MaxValue, (long)privOff + privSize));
         fd.DefaultWidthX = pd.TryGetValue(20, out double[]? dw) && dw.Length > 0 ? dw[0] : 0;
         fd.NominalWidthX = pd.TryGetValue(21, out double[]? nw) && nw.Length > 0 ? nw[0] : 0;
         if (pd.TryGetValue(19, out double[]? subrs) && subrs.Length > 0)
         {
-            CffIndex.Read(data, privOff + (int)subrs[0], out CffIndex local);
+            CffIndex.Read(data, (int)Math.Max(int.MinValue, Math.Min(int.MaxValue, (long)privOff + ToInt(subrs[0]))), out CffIndex local);
             fd.LocalSubrs = local;
             fd.LocalBias = Bias(local.Count);
         }
@@ -145,7 +154,7 @@ public sealed class CffFont
             return new[] { new FontDict() };
         }
 
-        CffIndex.Read(data, (int)fda[0], out CffIndex fdIndex);
+        CffIndex.Read(data, ToInt(fda[0]), out CffIndex fdIndex);
         int count = Math.Max(1, fdIndex.Count);
         var fds = new FontDict[count];
         for (int i = 0; i < fdIndex.Count; i++)
@@ -155,7 +164,7 @@ public sealed class CffFont
             Dictionary<int, double[]> d = ParseDict(data, s, s + l);
             if (d.TryGetValue(18, out double[]? priv) && priv.Length >= 2)
             {
-                FillPrivate(data, (int)priv[1], (int)priv[0], fd);
+                FillPrivate(data, ToInt(priv[1]), ToInt(priv[0]), fd);
             }
 
             fds[i] = fd;
@@ -177,7 +186,7 @@ public sealed class CffFont
             return sel;
         }
 
-        var r = new BigEndianReader(data) { Position = (int)fs[0] };
+        var r = new BigEndianReader(data) { Position = ToInt(fs[0]) };
         int format = r.ReadU8();
         if (format == 0)
         {
@@ -212,7 +221,7 @@ public sealed class CffFont
     private static int[] ReadCharset(byte[] data, Dictionary<int, double[]> top, int nGlyphs)
     {
         var charset = new int[nGlyphs];
-        int off = top.TryGetValue(15, out double[]? c) && c.Length > 0 ? (int)c[0] : 0;
+        int off = top.TryGetValue(15, out double[]? c) && c.Length > 0 ? ToInt(c[0]) : 0;
         if (off == 0)
         {
             // ISOAdobe / predefined: identity is a reasonable fallback for CID geometry-by-GID.
@@ -251,7 +260,10 @@ public sealed class CffFont
         return charset;
     }
 
-    /// <summary>Returns the outline of a glyph (font units), or <see cref="GlyphOutline.Empty"/> on fault.</summary>
+    /// <summary>
+    /// Returns the outline of a glyph (font units), or <see cref="GlyphOutline.Empty"/> on fault or when the
+    /// glyph exceeds the per-glyph work limit.
+    /// </summary>
     /// <param name="glyphId">The glyph id.</param>
     public GlyphOutline GetGlyph(int glyphId)
     {
@@ -260,9 +272,20 @@ public sealed class CffFont
             return GlyphOutline.Empty;
         }
 
-        var interp = new Type2Interpreter(this);
-        return interp.Run(glyphId);
+        try
+        {
+            var interp = new Type2Interpreter(this);
+            return interp.Run(glyphId);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return GlyphOutline.Empty;
+        }
     }
+
+    // DICT operands are doubles; NaN or out-of-range values must not reach an unchecked int cast.
+    private static int ToInt(double v)
+        => double.IsNaN(v) ? 0 : (v >= int.MaxValue ? int.MaxValue : (v <= int.MinValue ? int.MinValue : (int)v));
 
     private static int Bias(int count) => count < 1240 ? 107 : (count < 33900 ? 1131 : 32768);
 
@@ -283,12 +306,19 @@ public sealed class CffFont
             char c = (char)r.ReadU8();
             char d = (char)r.ReadU8();
             r.ReadU32();
-            int offset = (int)r.ReadU32();
-            int length = (int)r.ReadU32();
+            uint offset = r.ReadU32();
+            uint length = r.ReadU32();
             if (a == 'C' && b == 'F' && c == 'F' && d == ' ')
             {
-                var cff = new byte[length];
-                Array.Copy(data, offset, cff, 0, Math.Min(length, data.Length - offset));
+                // Clip the table to the bytes actually present, in unsigned/long arithmetic.
+                if (offset >= (uint)data.Length)
+                {
+                    throw new NotSupportedException("OpenType 'CFF ' table lies outside the font data.");
+                }
+
+                long available = data.Length - (long)offset;
+                var cff = new byte[Math.Min(length, available)];
+                Array.Copy(data, (int)offset, cff, 0, cff.Length);
                 return cff;
             }
         }
@@ -312,7 +342,7 @@ public sealed class CffFont
                 p++;
                 if (b0 == 12)
                 {
-                    op = 1200 + data[p];
+                    op = 1200 + (p < data.Length ? data[p] : 0);
                     p++;
                 }
 
@@ -332,15 +362,16 @@ public sealed class CffFont
     private static int ReadDictNumber(byte[] d, int p, out double value)
     {
         int b0 = d[p];
+        int At(int i) => p + i < d.Length ? d[p + i] : 0; // truncated operands read as zero
         if (b0 == 28)
         {
-            value = (short)((d[p + 1] << 8) | d[p + 2]);
+            value = (short)((At(1) << 8) | At(2));
             return p + 3;
         }
 
         if (b0 == 29)
         {
-            value = (d[p + 1] << 24) | (d[p + 2] << 16) | (d[p + 3] << 8) | d[p + 4];
+            value = (At(1) << 24) | (At(2) << 16) | (At(3) << 8) | At(4);
             return p + 5;
         }
 
@@ -357,13 +388,13 @@ public sealed class CffFont
 
         if (b0 >= 247 && b0 <= 250)
         {
-            value = ((b0 - 247) * 256) + d[p + 1] + 108;
+            value = ((b0 - 247) * 256) + At(1) + 108;
             return p + 2;
         }
 
         if (b0 >= 251 && b0 <= 254)
         {
-            value = (-(b0 - 251) * 256) - d[p + 1] - 108;
+            value = (-(b0 - 251) * 256) - At(1) - 108;
             return p + 2;
         }
 
@@ -408,6 +439,7 @@ public sealed class CffFont
     private sealed class Type2Interpreter
     {
         private readonly CffFont _font;
+        private readonly GlyphWork _work = new GlyphWork();
         private readonly List<double> _stack = new List<double>();
         private readonly ContourBuilder _builder = new ContourBuilder();
         private CffIndex _localSubrs;
@@ -439,9 +471,14 @@ public sealed class CffFont
             {
                 Execute(start, start + len, 0);
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                // a malformed charstring degrades to whatever was built so far
+                // A glyph over the work limit is dropped; a malformed charstring degrades to whatever was
+                // built so far.
+                if (_work.Exhausted)
+                {
+                    return GlyphOutline.Empty;
+                }
             }
 
             return new GlyphOutline(_builder.Build(), (int)Math.Round(_width));
@@ -449,15 +486,18 @@ public sealed class CffFont
 
         private bool Execute(int start, int end, int depth)
         {
-            if (depth > MaxSubrDepth)
+            if (depth > Limits.MaxCffSubrDepth)
             {
                 return true;
             }
 
+            // Every call and every byte is charged to the glyph's work budget, shared across subroutines.
+            _work.Charge(1);
             byte[] d = _font._data;
             int p = start;
             while (p < end && p < d.Length)
             {
+                _work.Charge(1);
                 int b0 = d[p++];
                 if (b0 >= 32 || b0 == 28)
                 {
@@ -493,7 +533,7 @@ public sealed class CffFont
                     case 31: AlternatingCurveTo(true); break;
                     case 10:
                     {
-                        int idx = (int)Pop() + _localBias;
+                        int idx = ToInt(Pop()) + _localBias;
                         if (idx >= 0 && idx < _localSubrs.Count)
                         {
                             (int s, int l) = _localSubrs.Item(idx);
@@ -508,7 +548,7 @@ public sealed class CffFont
 
                     case 29:
                     {
-                        int idx = (int)Pop() + _font._globalBias;
+                        int idx = ToInt(Pop()) + _font._globalBias;
                         if (idx >= 0 && idx < _font._globalSubrs.Count)
                         {
                             (int s, int l) = _font._globalSubrs.Item(idx);
@@ -527,7 +567,8 @@ public sealed class CffFont
                         EndChar();
                         return true;
                     case 12:
-                        Escape(d[p++]);
+                        Escape(p < d.Length ? d[p] : 0);
+                        p++;
                         break;
                     default:
                         _stack.Clear();
@@ -540,9 +581,10 @@ public sealed class CffFont
 
         private int ReadOperand(byte[] d, int b0, int p)
         {
+            int At(int i) => p + i < d.Length ? d[p + i] : 0; // truncated operands read as zero
             if (b0 == 28)
             {
-                _stack.Add((short)((d[p] << 8) | d[p + 1]));
+                _stack.Add((short)((At(0) << 8) | At(1)));
                 return p + 2;
             }
 
@@ -554,17 +596,17 @@ public sealed class CffFont
 
             if (b0 < 251)
             {
-                _stack.Add(((b0 - 247) * 256) + d[p] + 108);
+                _stack.Add(((b0 - 247) * 256) + At(0) + 108);
                 return p + 1;
             }
 
             if (b0 < 255)
             {
-                _stack.Add((-(b0 - 251) * 256) - d[p] - 108);
+                _stack.Add((-(b0 - 251) * 256) - At(0) - 108);
                 return p + 1;
             }
 
-            int fixed32 = (d[p] << 24) | (d[p + 1] << 16) | (d[p + 2] << 8) | d[p + 3];
+            int fixed32 = (At(0) << 24) | (At(1) << 16) | (At(2) << 8) | At(3);
             _stack.Add(fixed32 / 65536.0);
             return p + 4;
         }

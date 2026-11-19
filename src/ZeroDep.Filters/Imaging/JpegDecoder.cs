@@ -36,8 +36,18 @@ public static partial class JpegDecoder
     /// <exception cref="NotSupportedException">The JPEG uses an unsupported process or component count.</exception>
     public static RasterImage Decode(byte[] data)
     {
-        PlaneSet planes = DecodeToPlanes(data);
-        return Combine(planes.Meta, planes.Planes, planes.PlaneW, planes.HMax, planes.VMax);
+        if (data is null)
+        {
+            throw new ArgumentNullException(nameof(data));
+        }
+
+        return DecoderBoundary.Run(
+            () =>
+            {
+                PlaneSet planes = DecodeToPlanes(data);
+                return Combine(planes.Meta, planes.Planes, planes.PlaneW, planes.HMax, planes.VMax);
+            },
+            "JPEG");
     }
 
     /// <summary>
@@ -47,10 +57,23 @@ public static partial class JpegDecoder
     /// </summary>
     /// <param name="data">The raw JPEG bytes (a <c>/DCTDecode</c> image stream).</param>
     /// <param name="preserveCmyk">When true, 4-component JPEGs are returned as 4-component CMYK.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The JPEG is malformed or exceeds the decode budget.</exception>
+    /// <exception cref="NotSupportedException">The JPEG uses an unsupported process or component count.</exception>
     public static RasterImage Decode(byte[] data, bool preserveCmyk)
     {
-        PlaneSet planes = DecodeToPlanes(data);
-        return Combine(planes.Meta, planes.Planes, planes.PlaneW, planes.HMax, planes.VMax, preserveCmyk);
+        if (data is null)
+        {
+            throw new ArgumentNullException(nameof(data));
+        }
+
+        return DecoderBoundary.Run(
+            () =>
+            {
+                PlaneSet planes = DecodeToPlanes(data);
+                return Combine(planes.Meta, planes.Planes, planes.PlaneW, planes.HMax, planes.VMax, preserveCmyk);
+            },
+            "JPEG");
     }
 
     internal static PlaneSet DecodeToPlanes(byte[] data)
@@ -71,6 +94,7 @@ public static partial class JpegDecoder
             throw new NotSupportedException("Only 1-, 3-, or 4-component JPEG is supported.");
         }
 
+        CheckBudget(meta);
         if (meta.Mode == JpegMode.Progressive)
         {
             return DecodeProgressive(data, meta);
@@ -84,6 +108,40 @@ public static partial class JpegDecoder
 
         Scan scan = FindScan(data, meta);
         return DecodeBaseline(data, meta, huff, scan);
+    }
+
+    // Rejects frames whose decode would exceed the pixel limit or the per-decode memory target, before
+    // allocating: padded component planes (1 byte per sample, plus a 4-byte coefficient per sample for
+    // progressive) and the combined output (1, 3 or 4 bytes per pixel).
+    private static void CheckBudget(JpegMetadata meta)
+    {
+        long pixels = (long)meta.Width * meta.Height;
+        if (pixels > Limits.MaxImagePixels)
+        {
+            throw new InvalidDataException($"JPEG of {meta.Width}x{meta.Height} exceeds the {Limits.MaxImagePixels} pixel limit.");
+        }
+
+        int hMax = 1, vMax = 1;
+        foreach (JpegComponent c in meta.Components)
+        {
+            hMax = Math.Max(hMax, c.HorizontalSampling);
+            vMax = Math.Max(vMax, c.VerticalSampling);
+        }
+
+        long mcusX = ((long)meta.Width + (8 * hMax) - 1) / (8 * hMax);
+        long mcusY = ((long)meta.Height + (8 * vMax) - 1) / (8 * vMax);
+        long planeSamples = 0;
+        foreach (JpegComponent c in meta.Components)
+        {
+            planeSamples += mcusX * c.HorizontalSampling * 8 * mcusY * c.VerticalSampling * 8;
+        }
+
+        long perSample = meta.Mode == JpegMode.Progressive ? 1 + sizeof(int) : 1;
+        long outBytes = pixels * (meta.ComponentCount == 1 ? 1 : meta.ComponentCount == 4 ? 4 : 3);
+        if ((planeSamples * perSample) + outBytes > Limits.MaxDecodeWorkingSetBytes)
+        {
+            throw new InvalidDataException($"JPEG of {meta.Width}x{meta.Height} exceeds the decode memory budget.");
+        }
     }
 
     /// <summary>Decoded component planes before colour combination (exposed for diagnostics/tests).</summary>
@@ -212,6 +270,7 @@ public static partial class JpegDecoder
         var pred = new int[n];
         var coef = new int[64];
         var block = new byte[64];
+        var idctScratch = new double[64];
         int restart = meta.RestartInterval;
         int mcuCount = 0;
 
@@ -228,8 +287,19 @@ public static partial class JpegDecoder
                     {
                         for (int bx = 0; bx < comp.HorizontalSampling; bx++)
                         {
-                            DecodeBlock(reader, dc, ac, quant[c], coef, ref pred[c]);
-                            InverseDct(coef, block);
+                            if (reader.Exhausted)
+                            {
+                                // No entropy data is left before the next marker (truncated or crafted
+                                // input): repeat the DC level instead of decoding implied zero bits.
+                                Array.Clear(coef, 0, 64);
+                                coef[0] = pred[c] * quant[c][0];
+                            }
+                            else
+                            {
+                                DecodeBlock(reader, dc, ac, quant[c], coef, ref pred[c]);
+                            }
+
+                            InverseDct(coef, block, idctScratch);
                             int originX = ((mx * comp.HorizontalSampling) + bx) * 8;
                             int originY = ((my * comp.VerticalSampling) + by) * 8;
                             PlaceBlock(planes[c], planeW[c], originX, originY, block);
@@ -287,9 +357,23 @@ public static partial class JpegDecoder
         }
     }
 
-    private static void InverseDct(int[] coef, byte[] outBlock)
+    private static void InverseDct(int[] coef, byte[] outBlock, double[] tmp)
     {
-        var tmp = new double[64];
+        if (OnlyDc(coef))
+        {
+            // Same arithmetic as the full transform below with every AC term zero (Cos[0, *] is 1).
+            double rowValue = Cu[0] * coef[0] * Cos[0, 0];
+            double sum = Cu[0] * rowValue * Cos[0, 0];
+            int dcSample = (int)Math.Round(sum * 0.25) + 128;
+            byte value = (byte)(dcSample < 0 ? 0 : dcSample > 255 ? 255 : dcSample);
+            for (int i = 0; i < 64; i++)
+            {
+                outBlock[i] = value;
+            }
+
+            return;
+        }
+
         for (int row = 0; row < 8; row++)
         {
             for (int x = 0; x < 8; x++)
@@ -318,6 +402,19 @@ public static partial class JpegDecoder
                 outBlock[(y * 8) + x] = (byte)(sample < 0 ? 0 : sample > 255 ? 255 : sample);
             }
         }
+    }
+
+    private static bool OnlyDc(int[] coef)
+    {
+        for (int i = 1; i < 64; i++)
+        {
+            if (coef[i] != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void PlaceBlock(byte[] plane, int planeWidth, int originX, int originY, byte[] block)
@@ -578,6 +675,9 @@ public static partial class JpegDecoder
             _data = data;
             _pos = start;
         }
+
+        /// <summary>True when no entropy-coded bits remain before the next marker or the end of the data.</summary>
+        public bool Exhausted => _bitCount == 0 && (_atMarker || _pos >= _data.Length);
 
         public int ReadBit()
         {

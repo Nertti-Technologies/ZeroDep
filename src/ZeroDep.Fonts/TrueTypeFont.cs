@@ -11,8 +11,6 @@ namespace ZeroDep.Fonts;
 /// </summary>
 public sealed class TrueTypeFont
 {
-    private const int MaxCompositeDepth = 8;
-
     private readonly byte[] _data;
     private readonly int[] _loca;
     private readonly int[] _advanceWidths;
@@ -75,7 +73,8 @@ public sealed class TrueTypeFont
 
     /// <summary>
     /// Parses an embedded TrueType font program. Throws <see cref="NotSupportedException"/> for a
-    /// CFF-flavoured OpenType ('OTTO') program — that is handled by the CFF parser.
+    /// CFF-flavoured OpenType ('OTTO') program — that is handled by the CFF parser — and for a program
+    /// that is malformed.
     /// </summary>
     /// <param name="data">The decoded <c>/FontFile2</c> bytes.</param>
     public static TrueTypeFont Load(byte[] data)
@@ -85,6 +84,11 @@ public sealed class TrueTypeFont
             throw new ArgumentNullException(nameof(data));
         }
 
+        return FontFault.Guard(() => LoadCore(data));
+    }
+
+    private static TrueTypeFont LoadCore(byte[] data)
+    {
         var r = new BigEndianReader(data);
         uint version = r.ReadU32();
         if (version == 0x4F54544F)
@@ -113,7 +117,7 @@ public sealed class TrueTypeFont
         }
 
         r.Position = head.Offset + 18;
-        int unitsPerEm = r.ReadU16();
+        int unitsPerEm = FontFault.SanitizeUnitsPerEm(r.ReadU16());
         r.Position = head.Offset + 50;
         int indexToLocFormat = r.ReadS16();
 
@@ -174,12 +178,27 @@ public sealed class TrueTypeFont
     /// <param name="codepoint">The Unicode code point.</param>
     public int MapCodepointToGlyph(int codepoint) => _cmap?.Lookup(codepoint) ?? 0;
 
-    /// <summary>Returns the outline of a glyph (font units), or <see cref="GlyphOutline.Empty"/> if absent.</summary>
+    /// <summary>
+    /// Returns the outline of a glyph (font units), or <see cref="GlyphOutline.Empty"/> if absent, malformed,
+    /// or over the per-glyph work limit.
+    /// </summary>
     /// <param name="glyphId">The glyph id.</param>
     public GlyphOutline GetGlyph(int glyphId)
     {
+        try
+        {
+            return GetGlyphCore(glyphId);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return GlyphOutline.Empty;
+        }
+    }
+
+    private GlyphOutline GetGlyphCore(int glyphId)
+    {
         var builder = new ContourBuilder();
-        AppendGlyph(glyphId, builder, 0);
+        AppendGlyph(glyphId, builder, 0, new CompositeWalk());
         IReadOnlyList<GlyphContour> contours = builder.Build();
 
         // Align the outline's left edge to the metric left side bearing (FreeType convention): shift x by
@@ -211,7 +230,18 @@ public sealed class TrueTypeFont
             return GlyphOutline.Empty;
         }
 
-        RawGlyph? raw = ReadSimpleGlyphRaw(glyphId);
+        pixelsPerEm = Math.Min(pixelsPerEm, ushort.MaxValue); // ppem is 16-bit; keeps 26.6 arithmetic in range
+
+        RawGlyph? raw;
+        try
+        {
+            raw = ReadSimpleGlyphRaw(glyphId);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return GlyphOutline.Empty;
+        }
+
         if (raw is null || !HasHinting)
         {
             return ScaleOutline(GetGlyph(glyphId), pixelsPerEm);
@@ -232,7 +262,7 @@ public sealed class TrueTypeFont
                 return BuildHintedOutline(raw, hx, hy, ScaleAdvance(advance, pixelsPerEm));
             }
         }
-        catch (Exception)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             // hinting fault → fall back to the scaled unhinted outline
         }
@@ -268,7 +298,10 @@ public sealed class TrueTypeFont
     }
 
     private int ScaleAdvance(int advance, int ppem)
-        => (int)Math.Round((double)advance * ppem * 64 / UnitsPerEm);
+    {
+        double v = Math.Round((double)advance * ppem * 64 / UnitsPerEm);
+        return v >= int.MaxValue ? int.MaxValue : (v <= int.MinValue ? int.MinValue : (int)v);
+    }
 
     private GlyphOutline ScaleOutline(GlyphOutline outline, int ppem)
     {
@@ -431,17 +464,13 @@ public sealed class TrueTypeFont
             return null;
         }
 
-        var endPts = new int[numberOfContours];
-        for (int i = 0; i < numberOfContours; i++)
-        {
-            endPts[i] = r.ReadU16();
-        }
-
-        int numPoints = endPts[numberOfContours - 1] + 1;
-        if (numPoints <= 0)
+        int[]? endPts = ReadEndPoints(r, numberOfContours);
+        if (endPts is null)
         {
             return null;
         }
+
+        int numPoints = endPts[numberOfContours - 1] + 1;
 
         int instructionLength = r.ReadU16();
         var instructions = new byte[instructionLength];
@@ -568,12 +597,43 @@ public sealed class TrueTypeFont
         return shifted;
     }
 
-    private void AppendGlyph(int glyphId, ContourBuilder builder, int depth)
+    // Reads a simple glyph's contour end points; null unless they strictly increase (a decreasing end
+    // point would index past the point arrays).
+    private static int[]? ReadEndPoints(BigEndianReader r, int numberOfContours)
     {
-        if (depth > MaxCompositeDepth || glyphId < 0 || glyphId + 1 >= _loca.Length)
+        var endPts = new int[numberOfContours];
+        int previous = -1;
+        for (int i = 0; i < numberOfContours; i++)
+        {
+            endPts[i] = r.ReadU16();
+            if (endPts[i] <= previous)
+            {
+                return null;
+            }
+
+            previous = endPts[i];
+        }
+
+        return endPts;
+    }
+
+    // Per-GetGlyph state for composite expansion: the work budget (components and points), and the glyph
+    // ids being expanded on the current path, so a composite that includes itself is skipped.
+    private sealed class CompositeWalk
+    {
+        public GlyphWork Work { get; } = new GlyphWork();
+
+        public HashSet<int> Active { get; } = new HashSet<int>();
+    }
+
+    private void AppendGlyph(int glyphId, ContourBuilder builder, int depth, CompositeWalk walk)
+    {
+        if (depth > Limits.MaxCompositeDepth || glyphId < 0 || glyphId + 1 >= _loca.Length)
         {
             return;
         }
+
+        walk.Work.Charge(1);
 
         int start = _glyfOffset + _loca[glyphId];
         int end = _glyfOffset + _loca[glyphId + 1];
@@ -588,32 +648,36 @@ public sealed class TrueTypeFont
 
         if (numberOfContours >= 0)
         {
-            AppendSimpleGlyph(r, numberOfContours, builder);
+            AppendSimpleGlyph(r, numberOfContours, builder, walk.Work);
         }
-        else
+        else if (walk.Active.Add(glyphId))
         {
-            AppendCompositeGlyph(r, builder, depth);
+            try
+            {
+                AppendCompositeGlyph(r, end, builder, depth, walk);
+            }
+            finally
+            {
+                walk.Active.Remove(glyphId);
+            }
         }
     }
 
-    private static void AppendSimpleGlyph(BigEndianReader r, int numberOfContours, ContourBuilder builder)
+    private static void AppendSimpleGlyph(BigEndianReader r, int numberOfContours, ContourBuilder builder, GlyphWork work)
     {
         if (numberOfContours == 0)
         {
             return;
         }
 
-        var endPts = new int[numberOfContours];
-        for (int i = 0; i < numberOfContours; i++)
+        int[]? endPts = ReadEndPoints(r, numberOfContours);
+        if (endPts is null)
         {
-            endPts[i] = r.ReadU16();
+            return; // malformed: end points must increase
         }
 
         int numPoints = endPts[numberOfContours - 1] + 1;
-        if (numPoints <= 0)
-        {
-            return;
-        }
+        work.Charge(numPoints);
 
         int instructionLength = r.ReadU16();
         r.Position += instructionLength; // skip hinting instructions (F6)
@@ -774,10 +838,12 @@ public sealed class TrueTypeFont
         }
     }
 
-    private void AppendCompositeGlyph(BigEndianReader r, ContourBuilder builder, int depth)
+    private void AppendCompositeGlyph(BigEndianReader r, int end, ContourBuilder builder, int depth, CompositeWalk walk)
     {
-        while (true)
+        // A component record is at least 6 bytes; stop at the end of the glyph's data.
+        while (r.Position + 6 <= end)
         {
+            walk.Work.Charge(1);
             int flags = r.ReadU16();
             int glyphIndex = r.ReadU16();
 
@@ -817,9 +883,11 @@ public sealed class TrueTypeFont
             double dy = (flags & 0x0002) != 0 ? arg2 : 0;
 
             var sub = new ContourBuilder();
-            AppendGlyph(glyphIndex, sub, depth + 1);
+            AppendGlyph(glyphIndex, sub, depth + 1, walk);
             foreach (GlyphContour contour in sub.Build())
             {
+                // Copying a component's segments into each enclosing level is work too.
+                walk.Work.Charge(contour.Segments.Count + 1);
                 AppendTransformed(contour, builder, a, b, c, d, dx, dy);
             }
 

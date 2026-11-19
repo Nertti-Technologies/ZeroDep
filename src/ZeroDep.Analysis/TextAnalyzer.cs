@@ -53,7 +53,7 @@ internal static class TextAnalyzer
             {
                 result = interpreter.RunAll(content, resources, Matrix.Identity);
             }
-            catch
+            catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
             {
                 continue;
             }
@@ -159,7 +159,7 @@ internal static class TextAnalyzer
                 return buffer.ToArray();
             }
         }
-        catch
+        catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
         {
             return Array.Empty<byte>();
         }

@@ -82,7 +82,7 @@ internal static class ColorImageDecoder
                 {
                     (rgb, family) = DecodeImage(document, image, resources, shouldDecode);
                 }
-                catch (Exception)
+                catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
                 {
                     continue; // an undecodable image is isolated, never aborts the document
                 }
@@ -211,7 +211,7 @@ internal static class ColorImageDecoder
                 {
                     return StreamDecoder.Decode(globals);
                 }
-                catch (Exception)
+                catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
                 {
                     return null;
                 }

@@ -46,21 +46,17 @@ internal sealed class Jbig2Bitmap
     /// </summary>
     public void Combine(Jbig2Bitmap region, int x, int y, int op)
     {
-        for (int ry = 0; ry < region.Height; ry++)
+        // Visit only the overlap with this bitmap (long arithmetic: offsets come from the file).
+        int ryStart = (int)Math.Max(0, Math.Min(region.Height, -(long)y));
+        int ryEnd = (int)Math.Max(0, Math.Min(region.Height, (long)Height - y));
+        int rxStart = (int)Math.Max(0, Math.Min(region.Width, -(long)x));
+        int rxEnd = (int)Math.Max(0, Math.Min(region.Width, (long)Width - x));
+        for (int ry = ryStart; ry < ryEnd; ry++)
         {
             int py = y + ry;
-            if (py < 0 || py >= Height)
-            {
-                continue;
-            }
-
-            for (int rx = 0; rx < region.Width; rx++)
+            for (int rx = rxStart; rx < rxEnd; rx++)
             {
                 int px = x + rx;
-                if (px < 0 || px >= Width)
-                {
-                    continue;
-                }
 
                 int s = region.Data[(ry * region.Width) + rx];
                 int idx = (py * Width) + px;

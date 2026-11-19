@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace ZeroDep.Filters;
 
@@ -20,21 +21,31 @@ public static class LzwDecode
     /// <param name="columns">The <c>/Columns</c> value (samples per row).</param>
     /// <param name="earlyChange">The <c>/EarlyChange</c> value (default 1).</param>
     /// <returns>The decoded bytes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The predictor parameters are invalid, or the output exceeds 256 MiB.</exception>
     public static byte[] Decode(byte[] input, int predictor, int colors, int bitsPerComponent, int columns, int earlyChange)
     {
         byte[] raw = Decode(input, earlyChange);
-        return predictor <= 1 ? raw : Predictor.Apply(raw, predictor, colors, bitsPerComponent, columns);
+        return predictor <= 1
+            ? raw
+            : DecoderBoundary.Run(() => Predictor.Apply(raw, predictor, colors, bitsPerComponent, columns), "LZWDecode");
     }
 
     /// <summary>Decodes LZW data (no predictor).</summary>
     /// <param name="input">The compressed bytes.</param>
     /// <param name="earlyChange">The <c>/EarlyChange</c> value (default 1).</param>
     /// <returns>The decoded bytes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The output exceeds 256 MiB.</exception>
     public static byte[] Decode(byte[] input, int earlyChange = 1)
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
+        return DecoderBoundary.Run(() => DecodeCore(input, earlyChange), "LZWDecode");
+    }
 
-        var output = new List<byte>(input.Length * 3);
+    private static byte[] DecodeCore(byte[] input, int earlyChange)
+    {
+        var output = new BoundedOutput(input.Length * 3);
         var table = new List<byte[]>(4096);
         void Reset()
         {
@@ -91,9 +102,10 @@ public static class LzwDecode
                 break; // invalid stream
             }
 
-            output.AddRange(entry);
+            output.Write(entry, 0, entry.Length);
 
-            if (previous is not null)
+            // The code space is 12 bits (4096 entries); a full table stays as it is until ClearTable.
+            if (previous is not null && table.Count < Limits.LzwMaxTableEntries)
             {
                 var added = new byte[previous.Length + 1];
                 Array.Copy(previous, added, previous.Length);

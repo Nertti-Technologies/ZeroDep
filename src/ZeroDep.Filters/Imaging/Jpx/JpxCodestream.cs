@@ -561,16 +561,24 @@ internal static class JpxCodestream
                 boxLen = d.Length - p;
             }
 
+            // A box is at least its own header and must lie within the data (ISO 15444-1 Annex I); a
+            // shorter length would never advance p, and a longer one is truncated data.
+            bool fits = boxLen >= headerLen && boxLen <= d.Length - p;
             if (type == 0x6A703263) // 'jp2c'
             {
                 int start = p + headerLen;
-                int end = (int)Math.Min(p + boxLen, d.Length);
+                int end = fits ? (int)(p + boxLen) : d.Length;
+                if (start > end)
+                {
+                    break;
+                }
+
                 var cs = new byte[end - start];
                 Array.Copy(d, start, cs, 0, cs.Length);
                 return cs;
             }
 
-            if (boxLen <= 0)
+            if (!fits)
             {
                 break;
             }

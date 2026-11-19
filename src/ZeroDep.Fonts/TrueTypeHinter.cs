@@ -10,8 +10,6 @@ namespace ZeroDep.Fonts;
 /// </summary>
 internal sealed class TrueTypeHinter
 {
-    private const int MaxCallDepth = 128;
-    private const long MaxInstructions = 4_000_000;
 
     private readonly byte[] _fpgm;
     private readonly byte[] _prep;
@@ -24,7 +22,7 @@ internal sealed class TrueTypeHinter
 
     private GraphicsState _gs;
     private GraphicsState _default;
-    private int[] _stack;
+    private readonly int[] _stack;
     private int _sp;
     private long _count;
     private Zone _zp0 = null!;
@@ -40,7 +38,8 @@ internal sealed class TrueTypeHinter
         _scale = DivFix(ppem * 64, Math.Max(1, unitsPerEm));
         _storage = new int[Math.Max(1, limits.MaxStorage)];
         _functions = new Function[Math.Max(1, limits.MaxFunctionDefs) + limits.MaxInstructionDefs + 256];
-        _stack = new int[Math.Max(64, limits.MaxStack) + 64];
+        // The stack is bounded by the font's declared maxStackElements plus headroom; deeper is a fault.
+        _stack = new int[Math.Max(64, limits.MaxStack) + Limits.HinterStackHeadroom];
         _twilight = new Zone(Math.Max(1, limits.MaxTwilightPoints));
 
         // Scale CVT (FWords -> 26.6).
@@ -68,6 +67,7 @@ internal sealed class TrueTypeHinter
         if (_prep.Length > 0)
         {
             _sp = 0;
+            _count = 0; // prep gets its own work budget, like each glyph program
             SafeRun(_prep, 0, _prep.Length);
         }
 
@@ -168,17 +168,14 @@ internal sealed class TrueTypeHinter
 
     private void Execute(byte[] code, int ip, int end, int depth)
     {
-        if (depth > MaxCallDepth)
+        if (depth > Limits.MaxHinterCallDepth)
         {
             return;
         }
 
         while (ip < end)
         {
-            if (++_count > MaxInstructions)
-            {
-                throw new InvalidOperationException("instruction budget exceeded");
-            }
+            Charge();
 
             byte op = code[ip++];
             switch (op)
@@ -860,8 +857,19 @@ internal sealed class TrueTypeHinter
         return (ipAfterOpcode - 1) + offset;
     }
 
+    // One unit of the work budget. Every instruction, function call and loop iteration is charged, so an
+    // empty function called in a loop cannot bypass the budget.
+    private void Charge()
+    {
+        if (++_count > Limits.MaxWorkPerGlyph)
+        {
+            throw new InvalidOperationException("instruction budget exceeded");
+        }
+    }
+
     private void CallFunction(int f, int depth)
     {
+        Charge();
         if (f < 0 || f >= _functions.Length)
         {
             return;
@@ -1007,7 +1015,7 @@ internal sealed class TrueTypeHinter
     {
         if (_sp >= _stack.Length)
         {
-            Array.Resize(ref _stack, _stack.Length * 2);
+            throw new InvalidOperationException("hinting stack overflow");
         }
 
         _stack[_sp++] = v;
@@ -1350,6 +1358,7 @@ internal sealed class TrueTypeHinter
         int loop = _gs.Loop;
         for (int i = 0; i < loop; i++)
         {
+            Charge();
             int p = Pop();
             int distance = -ProjectDelta(_zp1, p, _zp0, _gs.Rp0);
             Move(_zp1, p, distance);
@@ -1372,6 +1381,7 @@ internal sealed class TrueTypeHinter
         int loop = _gs.Loop;
         for (int i = 0; i < loop; i++)
         {
+            Charge();
             int p = Pop();
             _zp2.CurX[p] += dx;
             _zp2.CurY[p] += dy;
@@ -1387,6 +1397,7 @@ internal sealed class TrueTypeHinter
         int loop = _gs.Loop;
         for (int i = 0; i < loop; i++)
         {
+            Charge();
             int p = Pop();
             _zp2.CurX[p] += dx;
             _zp2.CurY[p] += dy;
@@ -1450,6 +1461,7 @@ internal sealed class TrueTypeHinter
         int loop = _gs.Loop;
         for (int i = 0; i < loop; i++)
         {
+            Charge();
             int p = Pop();
             int orgP = DualProject(_zp2, p);
             int curP = Project(_zp2, p);
@@ -1618,6 +1630,7 @@ internal sealed class TrueTypeHinter
         Zone z = _zp0;
         for (int i = 0; i < loop; i++)
         {
+            Charge();
             int p = Pop();
             if (p >= 0 && p < z.PhantomStart)
             {
@@ -1633,12 +1646,9 @@ internal sealed class TrueTypeHinter
         int high = Pop();
         int low = Pop();
         Zone z = _zp0;
-        for (int p = low; p <= high && p < z.PhantomStart; p++)
+        for (int p = Math.Max(low, 0); p <= high && p < z.PhantomStart; p++)
         {
-            if (p >= 0)
-            {
-                z.OnCurve[p] = on;
-            }
+            z.OnCurve[p] = on;
         }
     }
 
@@ -1681,6 +1691,7 @@ internal sealed class TrueTypeHinter
         int count = Pop();
         for (int i = 0; i < count; i++)
         {
+            Charge();
             int p = Pop();
             int arg = Pop();
             ApplyDelta(p, arg, baseOffset, false, 0);
@@ -1692,6 +1703,7 @@ internal sealed class TrueTypeHinter
         int count = Pop();
         for (int i = 0; i < count; i++)
         {
+            Charge();
             int c = Pop();
             int arg = Pop();
             ApplyDelta(0, arg, baseOffset, true, c);

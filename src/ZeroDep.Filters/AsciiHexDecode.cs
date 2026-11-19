@@ -7,9 +7,15 @@ namespace ZeroDep.Filters;
 public static class AsciiHexDecode
 {
     /// <summary>Decodes hex-encoded data, ignoring whitespace, ending at '&gt;'.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> is null.</exception>
     public static byte[] Decode(byte[] input)
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
+        return DecoderBoundary.Run(() => DecodeCore(input), "ASCIIHexDecode");
+    }
+
+    private static byte[] DecodeCore(byte[] input)
+    {
         var output = new List<byte>(input.Length / 2);
         int high = -1;
         foreach (byte b in input)

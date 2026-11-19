@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -9,21 +10,28 @@ namespace ZeroDep.Analysis;
 
 /// <summary>
 /// Runs all structural features over a single opened document and assembles the unified
-/// <see cref="DocumentAnalysis"/>. Corruption is reported as a structured rejection, never thrown.
+/// <see cref="DocumentAnalysis"/>. Corruption is reported as a structured rejection, never thrown:
+/// any failure other than <see cref="OutOfMemoryException"/> becomes a rejected result.
 /// </summary>
 internal static class DocumentAnalyzer
 {
     /// <summary>Opens a PDF stream and produces the full analysis (or a structured rejection).</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     public static DocumentAnalysis Analyze(Stream stream, int dpiThreshold, string? password = null)
     {
-        RejectionReason? preflight = PdfValidator.Preflight(stream);
-        if (preflight.HasValue)
+        if (stream is null)
         {
-            return Rejected(preflight.Value, "Pre-flight integrity check failed.");
+            throw new ArgumentNullException(nameof(stream));
         }
 
         try
         {
+            RejectionReason? preflight = PdfValidator.Preflight(stream);
+            if (preflight.HasValue)
+            {
+                return Rejected(preflight.Value, "Pre-flight integrity check failed.");
+            }
+
             using PdfDocument document = PdfDocument.Open(stream, password);
 
             SecurityInfo security = BuildSecurity(document);
@@ -48,6 +56,12 @@ internal static class DocumentAnalyzer
         catch (PdfSyntaxException ex)
         {
             return Rejected(PdfValidator.Classify(ex.Message), ex.Message);
+        }
+        catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+        {
+            // Any other failure inside the engine means the file drove it somewhere it could not handle:
+            // report it as a malformed object rather than letting an undocumented type escape.
+            return Rejected(RejectionReason.MalformedObject, ExceptionBoundary.Translate(ex).Message);
         }
     }
 

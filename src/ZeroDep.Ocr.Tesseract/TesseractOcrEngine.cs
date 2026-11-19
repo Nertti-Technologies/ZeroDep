@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 using ZeroDep.Abstractions;
 
 namespace ZeroDep.Ocr.Tesseract;
@@ -25,12 +26,18 @@ namespace ZeroDep.Ocr.Tesseract;
 /// Each <see cref="Recognize"/> call spawns its own short-lived process, so instances are safe to
 /// use concurrently. <see cref="Dispose"/> is a no-op, retained for interface symmetry.
 /// </para>
+/// <para>
+/// A run that does not finish within an internal time limit has its process tree killed and is
+/// reported as an OCR failure (<see cref="InvalidOperationException"/>). The scan image is passed through
+/// a temporary file that only the current user can read, and the file is deleted afterwards.
+/// </para>
 /// </remarks>
 public sealed class TesseractOcrEngine : IOcrEngine, IDisposable
 {
     private readonly string _exe;
     private readonly string? _tessDataDir;
     private readonly string _languages;
+    private readonly TimeSpan _timeout;
 
     /// <summary>Creates an engine that drives the <c>tesseract</c> CLI.</summary>
     /// <param name="tessDataPath">
@@ -41,10 +48,17 @@ public sealed class TesseractOcrEngine : IOcrEngine, IDisposable
     /// <param name="languages">Language code(s), <c>+</c>-joined, e.g. <c>eng</c> or <c>eng+fra</c>.</param>
     /// <param name="executable">The <c>tesseract</c> program to run; defaults to <c>tesseract</c> on <c>PATH</c>.</param>
     public TesseractOcrEngine(string? tessDataPath, string languages = "eng", string executable = "tesseract")
+        : this(tessDataPath, languages, executable, Limits.ProcessTimeout)
+    {
+    }
+
+    /// <summary>Creates an engine with an explicit per-run time limit (tests use a short one).</summary>
+    internal TesseractOcrEngine(string? tessDataPath, string languages, string executable, TimeSpan timeout)
     {
         _tessDataDir = string.IsNullOrWhiteSpace(tessDataPath) ? null : tessDataPath;
         _languages = string.IsNullOrWhiteSpace(languages) ? "eng" : languages;
         _exe = string.IsNullOrWhiteSpace(executable) ? "tesseract" : executable;
+        _timeout = timeout;
     }
 
     /// <inheritdoc/>
@@ -57,24 +71,9 @@ public sealed class TesseractOcrEngine : IOcrEngine, IDisposable
 
         options ??= new OcrOptions();
 
-        string tmp = Path.Combine(Path.GetTempPath(), "zerodep-ocr-" + Guid.NewGuid().ToString("N") + ".bmp");
-        try
-        {
-            File.WriteAllBytes(tmp, Bmp.Encode(image));
-            string tsv = RunTesseract(tmp);
-            return new OcrResult { Lines = ParseTsv(tsv, options, image) };
-        }
-        finally
-        {
-            try
-            {
-                File.Delete(tmp);
-            }
-            catch (IOException)
-            {
-                // Best-effort cleanup; a leftover temp file must not fail recognition.
-            }
-        }
+        using TempImageFile tmp = TempImageFile.Create(Bmp.Encode(image));
+        string tsv = RunTesseract(tmp.Path);
+        return new OcrResult { Lines = ParseTsv(tsv, options, image) };
     }
 
     /// <summary>
@@ -89,22 +88,8 @@ public sealed class TesseractOcrEngine : IOcrEngine, IDisposable
             throw new ArgumentNullException(nameof(image));
         }
 
-        string tmp = Path.Combine(Path.GetTempPath(), "zerodep-ocr-" + Guid.NewGuid().ToString("N") + ".bmp");
-        try
-        {
-            File.WriteAllBytes(tmp, Bmp.Encode(image));
-            return ParseWords(RunTesseract(tmp));
-        }
-        finally
-        {
-            try
-            {
-                File.Delete(tmp);
-            }
-            catch (IOException)
-            {
-            }
-        }
+        using TempImageFile tmp = TempImageFile.Create(Bmp.Encode(image));
+        return ParseWords(RunTesseract(tmp.Path));
     }
 
     /// <summary>No-op; the CLI adapter holds no unmanaged resources.</summary>
@@ -194,7 +179,22 @@ public sealed class TesseractOcrEngine : IOcrEngine, IDisposable
 
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
-        proc.WaitForExit();
+
+        // WaitForExitAsync also waits for the redirected output to reach end of stream, so the TSV is
+        // complete when it returns; the token bounds both.
+        using (var cts = new CancellationTokenSource(_timeout))
+        {
+            try
+            {
+                proc.WaitForExitAsync(cts.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                Kill(proc);
+                throw new InvalidOperationException(
+                    $"tesseract did not finish within {_timeout.TotalSeconds:0.#} s and was stopped.");
+            }
+        }
 
         if (proc.ExitCode != 0)
         {
@@ -203,6 +203,24 @@ public sealed class TesseractOcrEngine : IOcrEngine, IDisposable
         }
 
         return stdout.ToString();
+    }
+
+    // Kills the whole process tree (tesseract may run helpers) and reaps it, best effort.
+    private static void Kill(Process proc)
+    {
+        try
+        {
+            proc.Kill(entireProcessTree: true);
+            proc.WaitForExit((int)Limits.KillGrace.TotalMilliseconds);
+        }
+        catch (InvalidOperationException)
+        {
+            // Already exited.
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // The process could not be signalled (e.g. it is exiting); nothing more can be done.
+        }
     }
 
     // TSV columns: level page block par line word left top width height conf text

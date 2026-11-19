@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 
 namespace ZeroDep.Filters.Jbig2;
 
@@ -18,7 +19,7 @@ internal static class Jbig2SymbolDict
     }
 
     /// <summary>Decodes the dictionary; returns its exported symbols (input symbols come from referred dicts).</summary>
-    public static List<Jbig2Bitmap> Decode(byte[] d, int dataStart, int dataLen, IReadOnlyList<Jbig2Bitmap> inputSymbols)
+    public static List<Jbig2Bitmap> Decode(byte[] d, int dataStart, int dataLen, IReadOnlyList<Jbig2Bitmap> inputSymbols, PixelBudget budget)
     {
         int flags = (d[dataStart] << 8) | d[dataStart + 1];
         bool sdhuff = (flags & 1) != 0;
@@ -44,6 +45,10 @@ internal static class Jbig2SymbolDict
         p += 4;
         int numNewSyms = (int)U32(d, p);
         p += 4;
+        if (numExSyms < 0 || numExSyms > Limits.MaxJbig2Symbols || numNewSyms < 0 || numNewSyms > Limits.MaxJbig2Symbols)
+        {
+            throw new InvalidDataException($"JBIG2 symbol dictionary declares more than {Limits.MaxJbig2Symbols} symbols.");
+        }
 
         var mq = new MqDecoder(d, p, dataStart + dataLen);
         var iadh = new ArithContext(512);
@@ -83,6 +88,7 @@ internal static class Jbig2SymbolDict
                     break;
                 }
 
+                budget.Charge(symWidth, hcHeight, "JBIG2 symbol");
                 newSymbols.Add(Jbig2GenericRegion.Decode(mq, gb, symWidth, hcHeight, sdTemplate, at, false));
             }
         }

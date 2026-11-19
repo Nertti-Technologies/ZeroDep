@@ -9,9 +9,15 @@ Reads one image and prints JSON to stdout:
 text line; the C# adapter treats it as one unit (line for OcrResult, "word" for box-aligned scoring).
 
 Usage:  python3 zerodep_paddle_ocr.py <image_path> <paddle_lang>
+        python3 zerodep_paddle_ocr.py --serve <paddle_lang>
+
+Serve mode reads one JSON request per stdin line, {"id": "...", "path": "..."}, and answers each with one
+JSON line that echoes the id: {"id": "...", "words": [...]}. The id lets the caller ignore any line that
+is not the answer to its request.
 Requires:  pip install paddleocr   (tested with paddleocr 2.6-2.9)
 """
 import json
+import os
 import sys
 
 
@@ -75,39 +81,62 @@ def _recognize(ocr, image_path):
     return _parse_legacy(ocr.ocr(image_path, cls=True))  # 2.x API
 
 
-def _serve(lang):
-    """Persistent worker: load the model once, then read one image path per stdin line and emit one
-    JSON line per request on stdout. This amortizes PaddleOCR's heavy per-process init across a corpus.
+def _protocol_stdout():
+    """Detach the protocol channel from file descriptor 1 before anything else can write to it.
 
-    PaddleOCR logs freely to stdout, which would corrupt the protocol — so stdout is redirected to
-    stderr for the duration and our JSON is written to the original stdout handle only."""
-    from paddleocr import PaddleOCR
-
-    real_out = sys.stdout
+    PaddleOCR and its native libraries log freely to stdout, which would corrupt the protocol. Replacing
+    sys.stdout only catches Python-level prints, so the redirection is done at the OS level: the real
+    stdout is duplicated to a private descriptor for our JSON, and descriptor 1 is pointed at stderr.
+    This must run before paddleocr is imported, because the import itself can print."""
+    sys.stdout.flush()
+    proto_fd = os.dup(1)
+    os.dup2(2, 1)
     sys.stdout = sys.stderr
+    return os.fdopen(proto_fd, "w", encoding="utf-8", newline="\n")
+
+
+def _send(out, payload):
+    out.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    out.flush()
+
+
+def _serve(lang):
+    """Persistent worker: load the model once, then answer one JSON request per stdin line with one JSON
+    line on the protocol channel. This amortizes PaddleOCR's heavy per-process init across a corpus."""
+    out = _protocol_stdout()
+
     try:
+        from paddleocr import PaddleOCR
+
         ocr = PaddleOCR(lang=lang)
     except Exception as ex:  # noqa: BLE001
         sys.stderr.write(f"paddleocr init failed: {type(ex).__name__}: {ex}\n")
         return 1
 
-    real_out.write("READY\n")
-    real_out.flush()
+    out.write("READY\n")
+    out.flush()
 
+    stdin = sys.stdin.buffer
     while True:
-        line = sys.stdin.readline()
-        if not line:
+        raw = stdin.readline()
+        if not raw:
             break
-        path = line.strip()
-        if not path:
+        text = raw.decode("utf-8-sig", errors="replace").strip()
+        if not text:
+            continue
+        try:
+            request = json.loads(text)
+            req_id = request["id"]
+            path = request["path"]
+        except (ValueError, KeyError, TypeError) as ex:
+            sys.stderr.write(f"bad request: {type(ex).__name__}: {ex}\n")
             continue
         try:
             words = _recognize(ocr, path)
         except Exception as ex:  # noqa: BLE001
-            sys.stderr.write(f"paddleocr failed on {path}: {type(ex).__name__}: {ex}\n")
+            sys.stderr.write(f"paddleocr failed: {type(ex).__name__}: {ex}\n")
             words = []
-        real_out.write(json.dumps({"words": words or []}, ensure_ascii=False) + "\n")
-        real_out.flush()
+        _send(out, {"id": req_id, "words": words or []})
 
     return 0
 
