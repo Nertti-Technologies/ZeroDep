@@ -187,8 +187,8 @@ public sealed class BatchProcessor
             }
         }
 
-        bool encryptedUnreadable = analysis.Security.IsEncrypted
-            && analysis.Security.Authentication == AuthenticationResult.Failed;
+        // A password-required rejection carries no security details, but the document is still encrypted.
+        bool encryptedUnreadable = DocumentClassifier.IsEncryptedUnreadable(analysis);
 
         return new FileOutcome
         {
@@ -200,7 +200,7 @@ public sealed class BatchProcessor
             OcrPresent = ocrPresent,
             FormPresent = formPresent,
             EncryptionAlgorithm = analysis.Security.Algorithm,
-            Encrypted = analysis.Security.IsEncrypted,
+            Encrypted = analysis.Security.IsEncrypted || encryptedUnreadable,
             EncryptedUnreadable = encryptedUnreadable,
             Rejection = analysis.Rejection?.Reason ?? RejectionReason.None,
             Threshold = options.DpiThreshold,

@@ -43,12 +43,15 @@ internal static class Aggregator
                     break;
             }
 
-            if (outcome.EncryptedUnreadable)
+            // A password-required rejection is an encrypted, unreadable file even when the outcome was
+            // recorded without those flags.
+            bool unreadable = outcome.EncryptedUnreadable || outcome.Rejection == RejectionReason.EncryptedPasswordRequired;
+            if (unreadable)
             {
                 encryptedUnreadable++;
             }
 
-            if (outcome.Encrypted)
+            if (outcome.Encrypted || unreadable)
             {
                 encrypted++;
                 if (outcome.EncryptionAlgorithm != EncryptionAlgorithm.None)
