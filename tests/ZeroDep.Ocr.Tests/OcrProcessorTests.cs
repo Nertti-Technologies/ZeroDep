@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Reflection;
 using Xunit;
 using ZeroDep.Abstractions;
 using ZeroDep.Ocr;
@@ -51,6 +52,46 @@ public sealed class OcrProcessorTests
         Assert.Equal(0, run.PageIndex);
         Assert.Equal(100, run.Width, 3);
     }
+
+    [Fact]
+    public void Augment_KeepsEveryOtherAnalysisProperty()
+    {
+        var analysis = new DocumentAnalysis
+        {
+            SchemaVersion = "9.9",
+            Status = DocumentStatus.Rejected,   // not a realistic pairing; it gives each property a non-default value
+            Rejection = new RejectionInfo { Reason = RejectionReason.MalformedObject, Detail = "d" },
+            PageCount = 1,
+            Security = new SecurityInfo { IsEncrypted = true },
+            Images = new[] { new ImageDpiInfo { PageIndex = 0 } },
+            TextRuns = Array.Empty<TextRunInfo>(),
+            Form = new AcroFormReport { HasAcroForm = true },
+            Coverage = new[] { new CoverageItem { Id = "t0", Kind = "text", Value = "v" } },
+            Pages = new[] { new PageClassification { PageIndex = 0 } },
+            ImageAreaFraction = 0.95,
+        };
+
+        DocumentAnalysis result = OcrProcessor.Augment(analysis, OneJpegImage(), new FakeOcrEngine(), new OcrOptions());
+
+        Assert.NotSame(analysis, result);
+        foreach (PropertyInfo property in typeof(DocumentAnalysis).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (property.Name == nameof(DocumentAnalysis.TextRuns))
+            {
+                continue;
+            }
+
+            object? expected = property.GetValue(analysis);
+            Assert.NotEqual(property.GetValue(new DocumentAnalysis()), expected); // the fixture sets every property
+            Assert.Equal(expected, property.GetValue(result));
+        }
+    }
+
+    private static PdfImageInfo[] OneJpegImage()
+        => new[]
+        {
+            new PdfImageInfo { PageIndex = 0, Filter = "DCTDecode", DeclaredWidth = 8, DeclaredHeight = 8, EncodedData = Convert.FromBase64String(Gray8) },
+        };
 
     [Fact]
     public void Augment_WithNoImages_ReturnsOriginalAnalysis()
