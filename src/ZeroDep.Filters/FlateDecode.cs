@@ -20,14 +20,21 @@ public static class FlateDecode
     /// <param name="bitsPerComponent">The <c>/BitsPerComponent</c> value.</param>
     /// <param name="columns">The <c>/Columns</c> value (samples per row).</param>
     /// <returns>The decoded bytes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The data is corrupt, the predictor parameters are invalid, or the output exceeds 256 MiB.</exception>
     public static byte[] Decode(byte[] input, int predictor = 1, int colors = 1, int bitsPerComponent = 8, int columns = 1)
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
 
-        byte[] inflated = Inflate(input);
-        return predictor <= 1
-            ? inflated
-            : Predictor.Apply(inflated, predictor, colors, bitsPerComponent, columns);
+        return DecoderBoundary.Run(
+            () =>
+            {
+                byte[] inflated = Inflate(input);
+                return predictor <= 1
+                    ? inflated
+                    : Predictor.Apply(inflated, predictor, colors, bitsPerComponent, columns);
+            },
+            "FlateDecode");
     }
 
     private static byte[] Inflate(byte[] input)
@@ -37,8 +44,14 @@ public static class FlateDecode
         int offset = HasZlibHeader(input) ? 2 : 0;
         using var source = new MemoryStream(input, offset, input.Length - offset, writable: false);
         using var deflate = new DeflateStream(source, CompressionMode.Decompress);
-        using var output = new MemoryStream();
-        deflate.CopyTo(output);
+        // Copy in chunks into a bounded buffer: a small input can inflate to gigabytes.
+        var output = new BoundedOutput(input.Length * 4);
+        var chunk = new byte[81920];
+        int read;
+        while ((read = deflate.Read(chunk, 0, chunk.Length)) > 0)
+        {
+            output.Write(chunk, 0, read);
+        }
         return output.ToArray();
     }
 
