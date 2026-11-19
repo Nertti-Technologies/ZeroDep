@@ -1,10 +1,10 @@
 using System;
 using System.IO;
-using System.Text;
 using System.Threading.Tasks;
 using ZeroDep;
 using ZeroDep.Abstractions;
 using ZeroDep.Batch;
+using ZeroDep.Cli;
 
 if (args.Length > 0 && string.Equals(args[0], "batch", StringComparison.Ordinal))
 {
@@ -20,7 +20,7 @@ foreach (string arg in args)
 {
     if (arg == "--json") json = true;
     else if (arg.StartsWith("--password=", StringComparison.Ordinal)) password = arg.Substring("--password=".Length);
-    else if (int.TryParse(arg, out int value)) threshold = value;
+    else if (CliArguments.TryParseThreshold(arg, File.Exists, out int value)) threshold = value;
     else if (path is null) path = arg;
 }
 
@@ -55,8 +55,7 @@ using (FileStream stream = File.OpenRead(path))
     Console.WriteLine($"\nImages: {images.Count}  (below {threshold} DPI: {low})");
     foreach (ImageDpiInfo image in images)
     {
-        string flag = image.IsBelowThreshold ? "  [LOW]" : "";
-        Console.WriteLine($"  p{image.PageIndex} {image.ResourceName,-10} {image.PixelWidth}x{image.PixelHeight}px  eff {image.EffectiveDpi:F0} DPI{flag}");
+        Console.WriteLine(ConsoleText.ImageLine(image));
     }
 }
 
@@ -66,9 +65,7 @@ using (FileStream stream = File.OpenRead(path))
     Console.WriteLine($"\nAcroForm: {(form.HasAcroForm ? form.Fields.Count + " fields" : "none")}");
     foreach (FormFieldInfo field in form.Fields)
     {
-        string value = field.IsChecked is bool b ? (b ? "[X]" : "[ ]") : Truncate(Clean(field.Value ?? ""), 60);
-        string label = string.IsNullOrEmpty(field.Label) ? "" : "   (" + Truncate(Clean(field.Label!), 80) + ")";
-        Console.WriteLine($"  [{field.FieldType,-3}] {field.FullyQualifiedName} = {value}{label}");
+        Console.WriteLine(ConsoleText.FieldLine(field));
     }
 }
 
@@ -90,23 +87,14 @@ using (FileStream stream = File.OpenRead(path))
     int shown = 0;
     foreach (string line in text.Split('\n'))
     {
-        string clean = Clean(line).Trim();
+        string clean = ConsoleText.Clean(line).Trim();
         if (clean.Length == 0) continue;
-        Console.WriteLine(Truncate(clean, 100));
+        Console.WriteLine(ConsoleText.Truncate(clean, 100));
         if (++shown >= 30) break;
     }
 }
 
 return 0;
-
-static string Clean(string s)
-{
-    var sb = new StringBuilder(s.Length);
-    foreach (char c in s) sb.Append(char.IsControl(c) ? ' ' : c);
-    return sb.ToString();
-}
-
-static string Truncate(string s, int max) => s.Length > max ? s.Substring(0, max) + "…" : s;
 
 static async Task<int> RunBatchAsync(string[] args)
 {
@@ -122,9 +110,9 @@ static async Task<int> RunBatchAsync(string[] args)
     {
         string a = args[i];
         if (a.StartsWith("--output=", StringComparison.Ordinal)) output = a.Substring("--output=".Length);
-        else if (a.StartsWith("--threshold=", StringComparison.Ordinal) && int.TryParse(a.Substring("--threshold=".Length), out int t)) dpiThreshold = t;
+        else if (a.StartsWith("--threshold=", StringComparison.Ordinal) && CliArguments.TryParseInt(a.Substring("--threshold=".Length), out int t)) dpiThreshold = t;
         else if (a.StartsWith("--password=", StringComparison.Ordinal)) pw = a.Substring("--password=".Length);
-        else if (a.StartsWith("--concurrency=", StringComparison.Ordinal) && int.TryParse(a.Substring("--concurrency=".Length), out int c)) concurrency = c;
+        else if (a.StartsWith("--concurrency=", StringComparison.Ordinal) && CliArguments.TryParseInt(a.Substring("--concurrency=".Length), out int c)) concurrency = c;
         else if (a == "--no-resume") resume = false;
         else if (a == "--no-perfile") perFile = false;
         else if (input is null) input = a;
