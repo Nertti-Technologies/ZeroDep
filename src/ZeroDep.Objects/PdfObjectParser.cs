@@ -25,10 +25,19 @@ internal sealed class PdfObjectParser
     {
     }
 
-    /// <summary>Parses the next value from the token stream.</summary>
-    public PdfObject ParseValue() => FromToken(_lexer.Next());
+    /// <summary>
+    /// True once parsing ran into the end of the input: an end-of-input token was read, or a stream had no
+    /// <c>endstream</c> before the end. A caller reading a window of a larger file uses this to decide
+    /// whether a wider window could change the result.
+    /// </summary>
+    public bool ReachedEnd { get; private set; }
 
-    private PdfObject FromToken(Token token)
+    /// <summary>Parses the next value from the token stream.</summary>
+    public PdfObject ParseValue() => FromToken(_lexer.Next(), 0);
+
+    // depth counts the arrays and dictionaries that enclose the token; it is bounded by
+    // Limits.MaxNestingDepth so that crafted nesting cannot exhaust the thread stack.
+    private PdfObject FromToken(Token token, int depth)
     {
         switch (token.Type)
         {
@@ -43,9 +52,9 @@ internal sealed class PdfObjectParser
             case TokenType.HexString:
                 return new PdfString(token.Bytes!, isHexString: true);
             case TokenType.ArrayStart:
-                return ParseArray();
+                return ParseArray(depth + 1);
             case TokenType.DictStart:
-                return ParseDictionaryOrStream();
+                return ParseDictionaryOrStream(depth + 1);
             case TokenType.Keyword:
                 return token.Text switch
                 {
@@ -55,6 +64,7 @@ internal sealed class PdfObjectParser
                     _ => throw new PdfSyntaxException($"Unexpected keyword '{token.Text}'."),
                 };
             case TokenType.Eof:
+                ReachedEnd = true;
                 throw new PdfSyntaxException("Unexpected end of input while parsing an object.");
             default:
                 throw new PdfSyntaxException($"Unexpected token '{token.Type}'.");
@@ -70,6 +80,11 @@ internal sealed class PdfObjectParser
             Token third = _lexer.Next();
             if (third.Type == TokenType.Keyword && third.Text == "R")
             {
+                if (first < 0 || first > int.MaxValue || second.IntValue < 0 || second.IntValue > int.MaxValue)
+                {
+                    throw new PdfSyntaxException("Object or generation number in a reference is outside 0..2147483647.");
+                }
+
                 return new PdfReference((int)first, (int)second.IntValue);
             }
         }
@@ -78,33 +93,51 @@ internal sealed class PdfObjectParser
         return new PdfInteger(first);
     }
 
-    private PdfArray ParseArray()
+    private static void CheckDepth(int depth)
     {
+        if (depth > Limits.MaxNestingDepth)
+        {
+            throw new PdfSyntaxException($"Object nesting exceeds the limit of {Limits.MaxNestingDepth} levels.");
+        }
+    }
+
+    private PdfArray ParseArray(int depth)
+    {
+        CheckDepth(depth);
         var items = new List<PdfObject>();
         while (true)
         {
             Token token = _lexer.Next();
             if (token.Type == TokenType.ArrayEnd) break;
-            if (token.Type == TokenType.Eof) throw new PdfSyntaxException("Unterminated array.");
-            items.Add(FromToken(token));
+            if (token.Type == TokenType.Eof)
+            {
+                ReachedEnd = true;
+                throw new PdfSyntaxException("Unterminated array.");
+            }
+            items.Add(FromToken(token, depth));
         }
         return new PdfArray(items);
     }
 
-    private PdfObject ParseDictionaryOrStream()
+    private PdfObject ParseDictionaryOrStream(int depth)
     {
+        CheckDepth(depth);
         var entries = new Dictionary<string, PdfObject>(StringComparer.Ordinal);
         while (true)
         {
             Token keyToken = _lexer.Next();
             if (keyToken.Type == TokenType.DictEnd) break;
-            if (keyToken.Type == TokenType.Eof) throw new PdfSyntaxException("Unterminated dictionary.");
+            if (keyToken.Type == TokenType.Eof)
+            {
+                ReachedEnd = true;
+                throw new PdfSyntaxException("Unterminated dictionary.");
+            }
             if (keyToken.Type != TokenType.Name) throw new PdfSyntaxException("Dictionary key must be a name.");
 
             string key = keyToken.Text!;
             Token valueToken = _lexer.Next();
             if (valueToken.Type == TokenType.DictEnd) throw new PdfSyntaxException($"Missing value for /{key}.");
-            entries[key] = FromToken(valueToken);
+            entries[key] = FromToken(valueToken, depth);
         }
 
         var dictionary = new PdfDictionary(entries);
@@ -145,6 +178,7 @@ internal sealed class PdfObjectParser
         Array.Copy(buffer, dataStart, raw, 0, raw.Length);
 
         int endStream = IndexOf(buffer, dataEnd, end, EndStreamKeyword);
+        if (endStream < 0) ReachedEnd = true;
         _lexer.Seek(endStream >= 0 ? endStream + EndStreamKeyword.Length : end);
         return new PdfStream(dictionary, raw);
     }

@@ -57,6 +57,7 @@ internal sealed class PdfDocument : IDisposable
     public int Permissions => _file.Permissions;
 
     /// <summary>Opens a document and builds its page list.</summary>
+    /// <exception cref="PdfSyntaxException">The document is malformed or exceeds a structural limit.</exception>
     public static PdfDocument Open(Stream stream, string? password = null)
     {
         PdfFile file = PdfFile.Open(stream, password);
@@ -78,6 +79,12 @@ internal sealed class PdfDocument : IDisposable
             var pages = new List<PdfPage>();
             Traverse(file, pagesRoot, default, new HashSet<int>(), pages, 0);
             return new PdfDocument(file, catalog, pages);
+        }
+        catch (Exception ex) when (PdfFile.IsTranslatable(ex))
+        {
+            // Every content-caused failure surfaces as the documented exception type; out-of-memory does not.
+            file.Dispose();
+            throw new PdfSyntaxException("The document structure could not be read.", ex);
         }
         catch
         {
