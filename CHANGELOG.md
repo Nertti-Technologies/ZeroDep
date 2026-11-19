@@ -13,20 +13,6 @@ All notable changes to **ZeroDep** are documented here. The format follows
   (BSD-2-Clause) and a glyph-name list subset (BSD-3-Clause). The file is generated from `third-party/` by
   `build/generate-notices.sh`, and CI fails when it is out of date.
 
-### Changed
-
-- **Target frameworks are now `netstandard2.0`, `net10.0` and `net11.0`.** `net11.0` is added. `net8.0` is
-  removed because .NET 8 reached end of support on 2026-11-10; apps on .NET 8 still resolve the
-  `netstandard2.0` build, so no consumer loses access. The OCR adapters (`ZeroDep.Ocr.Tesseract`,
-  `ZeroDep.Ocr.Paddle`) now target `net10.0` and `net11.0`.
-- **Builds use the .NET SDK 11.0.100+** (`global.json`, `rollForward: latestFeature`). Tests run on both
-  `net10.0` and `net11.0`.
-- Invalid predictor parameters (predictor values 3–9 or above 15, unsupported colour or bit depths) are
-  rejected instead of being treated as PNG prediction.
-- The TrueType hinting interpreter now has an instruction budget of 1,000,000 for each program (font,
-  control value and glyph); a font that exceeds it falls back to the unhinted outline.
-
-### Added
 
 - **Configurable resource limits.** New `PdfLimits` (decoded stream size, image pixels, work per page and per
   document, form fields, font map entries) with the previous fixed values as defaults, set through the new
@@ -40,6 +26,19 @@ All notable changes to **ZeroDep** are documented here. The format follows
   only partly read because of a limit or unreadable content; both are emitted in the JSON, whose schema
   version is now 1.3.
 - A document-wide work budget now also counts object reads, so the total effort for one file is bounded.
+
+### Changed
+
+- **Target frameworks are now `netstandard2.0`, `net10.0` and `net11.0`.** `net11.0` is added. `net8.0` is
+  removed because .NET 8 reached end of support on 2026-11-10; apps on .NET 8 still resolve the
+  `netstandard2.0` build, so no consumer loses access. The OCR adapters (`ZeroDep.Ocr.Tesseract`,
+  `ZeroDep.Ocr.Paddle`) now target `net10.0` and `net11.0`.
+- **Builds use the .NET SDK 11.0.100+** (`global.json`, `rollForward: latestFeature`). Tests run on both
+  `net10.0` and `net11.0`.
+- Invalid predictor parameters (predictor values 3–9 or above 15, unsupported colour or bit depths) are
+  rejected instead of being treated as PNG prediction.
+- The TrueType hinting interpreter now has an instruction budget of 1,000,000 for each program (font,
+  control value and glyph); a font that exceeds it falls back to the unhinted outline.
 
 ### Fixed
 
