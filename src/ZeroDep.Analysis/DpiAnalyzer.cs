@@ -40,7 +40,7 @@ internal static class DpiAnalyzer
             {
                 placements = interpreter.Run(content, resources, Matrix.Identity);
             }
-            catch
+            catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
             {
                 continue; // a malformed page should not abort the whole document
             }
@@ -82,7 +82,7 @@ internal static class DpiAnalyzer
                 return buffer.ToArray();
             }
         }
-        catch
+        catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
         {
             return Array.Empty<byte>();
         }

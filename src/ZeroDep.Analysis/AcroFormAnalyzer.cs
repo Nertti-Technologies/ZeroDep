@@ -34,12 +34,13 @@ internal static class AcroFormAnalyzer
 
         Dictionary<int, int> widgetPages = BuildWidgetPageMap(document);
         var fields = new List<FormFieldInfo>();
+        var walk = new FieldWalk(document, widgetPages, fields);
 
         if (document.Resolve(acroForm["Fields"] ?? PdfNull.Instance) is PdfArray fieldRefs)
         {
             foreach (PdfObject fieldRef in fieldRefs.Items)
             {
-                Traverse(document, fieldRef, parentName: string.Empty, inheritedType: null, inheritedValue: null, widgetPages, fields, depth: 0);
+                Traverse(walk, fieldRef, parentName: string.Empty, inheritedType: null, inheritedValue: null, depth: 0);
             }
         }
 
@@ -65,11 +66,22 @@ internal static class AcroFormAnalyzer
         return map;
     }
 
-    private static void Traverse(PdfDocument document, PdfObject nodeRef, string parentName, PdfName? inheritedType, PdfObject? inheritedValue, Dictionary<int, int> widgetPages, List<FormFieldInfo> output, int depth)
+    // The field tree is a tree (ISO 32000-2 §12.7.4: each field has one /Parent), so an object reached a
+    // second time is a cycle or a shared node: it is skipped, which keeps the walk linear in the file. The
+    // node budget bounds the total work even for a very wide tree.
+    private static void Traverse(FieldWalk walk, PdfObject nodeRef, string parentName, PdfName? inheritedType, PdfObject? inheritedValue, int depth)
     {
         if (depth > MaxDepth) return;
 
         int? objectNumber = nodeRef is PdfReference reference ? reference.ObjectNumber : (int?)null;
+        if (objectNumber.HasValue && !walk.Visited.Add(objectNumber.Value)) return;
+
+        if (++walk.NodeCount > Limits.MaxFormFields)
+        {
+            throw new PdfSyntaxException($"AcroForm field limit exceeded ({Limits.MaxFormFields} fields).");
+        }
+
+        PdfDocument document = walk.Document;
         if (document.Resolve(nodeRef) is not PdfDictionary node) return;
 
         string? partialName = (document.Resolve(node["T"] ?? PdfNull.Instance) as PdfString)?.GetText();
@@ -82,12 +94,33 @@ internal static class AcroFormAnalyzer
         {
             foreach (PdfObject kid in kids.Items)
             {
-                Traverse(document, kid, fullyQualifiedName, fieldType, value, widgetPages, output, depth + 1);
+                Traverse(walk, kid, fullyQualifiedName, fieldType, value, depth + 1);
             }
             return;
         }
 
-        output.Add(BuildField(document, node, objectNumber, fullyQualifiedName, partialName, fieldType, value, kids, widgetPages));
+        walk.Output.Add(BuildField(document, node, objectNumber, fullyQualifiedName, partialName, fieldType, value, kids, walk.WidgetPages));
+    }
+
+    /// <summary>The state shared by one field-tree walk: the visited set and the node budget.</summary>
+    private sealed class FieldWalk
+    {
+        public FieldWalk(PdfDocument document, Dictionary<int, int> widgetPages, List<FormFieldInfo> output)
+        {
+            Document = document;
+            WidgetPages = widgetPages;
+            Output = output;
+        }
+
+        public PdfDocument Document { get; }
+
+        public Dictionary<int, int> WidgetPages { get; }
+
+        public List<FormFieldInfo> Output { get; }
+
+        public HashSet<int> Visited { get; } = new HashSet<int>();
+
+        public int NodeCount { get; set; }
     }
 
     private static bool HasFieldChild(PdfDocument document, PdfArray kids)

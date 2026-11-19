@@ -228,7 +228,7 @@ internal static class ImageExtractor
                 {
                     return StreamDecoder.Decode(globals);
                 }
-                catch (Exception)
+                catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
                 {
                     return null;
                 }
