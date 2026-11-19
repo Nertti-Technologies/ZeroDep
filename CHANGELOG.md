@@ -42,6 +42,10 @@ All notable changes to **ZeroDep** are documented here. The format follows
 
 ### Fixed
 
+- **CLI text report on rejected documents.** `zerodep <file.pdf>` without `--json` crashed with an unhandled
+  exception when a document exceeded a resource limit or could not be read. It now prints
+  `rejected (<reason>): <message>` to standard error and exits with code 3; `--json` already reported these
+  as a `Rejected` status.
 - **Bounded processing of malformed input.** Parsing, stream and image decoding, colour conversion, content
   interpretation and font handling now enforce fixed limits on nesting depth, decoded size, pixel count and
   work, and detect reference cycles. An input that exceeds a limit is rejected, or the affected page, image
