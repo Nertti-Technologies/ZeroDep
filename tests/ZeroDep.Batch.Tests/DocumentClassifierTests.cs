@@ -16,6 +16,17 @@ public sealed class DocumentClassifierTests
     }
 
     [Fact]
+    public void PasswordRequiredRejectionIsEncryptedUnreadable()
+    {
+        var analysis = new DocumentAnalysis
+        {
+            Status = DocumentStatus.Rejected,
+            Rejection = new RejectionInfo { Reason = RejectionReason.EncryptedPasswordRequired },
+        };
+        Assert.Equal(DocumentCategory.EncryptedUnreadable, DocumentClassifier.Classify(analysis, Thresholds));
+    }
+
+    [Fact]
     public void EncryptedAuthFailureIsEncryptedUnreadable()
     {
         var analysis = new DocumentAnalysis

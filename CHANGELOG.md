@@ -55,6 +55,30 @@ All notable changes to **ZeroDep** are documented here. The format follows
 - **OCR adapters.** Tesseract and PaddleOCR runs have time limits and are stopped when they exceed them;
   `PaddleOcrEngine.Dispose` can stop a busy worker; worker replies are matched by request id; temporary scan
   images are owner-only and removed afterwards.
+- **Batch: one unreadable file no longer stops the run.** A file that cannot be read (locked, deleted, no
+  permission), or whose per-file JSON cannot be written, is recorded as rejected (`MalformedObject`) and the
+  run continues.
+- **Batch: password-protected files are counted.** A document rejected with `EncryptedPasswordRequired` is
+  now classified as `EncryptedUnreadable`, marked encrypted, and included in the encrypted-unreadable
+  counts. `DocumentClassifier.Classify` returns `EncryptedUnreadable` for such a document instead of
+  `Rejected`.
+- **Batch: resume reuses only matching outcomes.** The ledger records whether a password was supplied (never
+  the password itself) and the engine version. A recorded outcome is reused only when the content, DPI
+  threshold, password presence and engine version all match; ledger lines from earlier versions are
+  processed again. The aggregate reports the run's DPI threshold rather than one taken from an arbitrary
+  outcome.
+- **Batch on netstandard2.0:** cancellation or a failure no longer disposes shared state while files are
+  still being processed.
+- **OCR:** `OcrProcessor.Augment` keeps the per-page classification (`Pages`) when it appends OCR text.
+- **Engine version:** `ZeroDepInfo.Version` reports the package version instead of a fixed `1.2.0`; the
+  aggregate's `engineVersion` changes accordingly.
+- **CLI:** field names, field types and image resource names are cleaned of control characters (C0, DEL
+  and C1) before printing, like values and labels already were. Numeric arguments are parsed with the
+  invariant culture, and an argument naming an existing file is taken as the input path even if it is a
+  number.
+- **JSON:** unpaired surrogates and U+2028/U+2029 are written as `\uXXXX` escapes, so the output is
+  always valid UTF-8 and safe to embed in JavaScript. `NaN` and infinities are written as `null` instead of
+  `0`.
 
 ## 2.1.1 — 2026-06-26
 

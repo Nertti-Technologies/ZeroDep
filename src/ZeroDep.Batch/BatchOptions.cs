@@ -26,7 +26,8 @@ public sealed class BatchOptions
 
     /// <summary>
     /// When true, files already recorded in the ledger with a matching input hash are skipped, so an
-    /// interrupted run resumes where it left off.
+    /// interrupted run resumes where it left off. A recorded outcome is reused only when it was produced
+    /// with the same <see cref="DpiThreshold"/>, the same password presence and the same engine version.
     /// </summary>
     public bool Resume { get; init; } = true;
 

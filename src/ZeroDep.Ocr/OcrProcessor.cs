@@ -96,20 +96,26 @@ public static class OcrProcessor
         var merged = new List<TextRunInfo>(analysis.TextRuns);
         merged.AddRange(ocrRuns);
 
-        return new DocumentAnalysis
-        {
-            SchemaVersion = analysis.SchemaVersion,
-            Status = analysis.Status,
-            Rejection = analysis.Rejection,
-            PageCount = analysis.PageCount,
-            Security = analysis.Security,
-            Images = analysis.Images,
-            TextRuns = merged,
-            Form = analysis.Form,
-            Coverage = analysis.Coverage,
-            ImageAreaFraction = analysis.ImageAreaFraction,
-        };
+        return WithTextRuns(analysis, merged);
     }
+
+    // Copies the analysis with only its text runs replaced. Every DocumentAnalysis property must be
+    // copied here; OcrProcessorTests checks each one by reflection, so a new property cannot be dropped.
+    private static DocumentAnalysis WithTextRuns(DocumentAnalysis source, IReadOnlyList<TextRunInfo> textRuns)
+        => new DocumentAnalysis
+        {
+            SchemaVersion = source.SchemaVersion,
+            Status = source.Status,
+            Rejection = source.Rejection,
+            PageCount = source.PageCount,
+            Security = source.Security,
+            Images = source.Images,
+            TextRuns = textRuns,
+            Form = source.Form,
+            Coverage = source.Coverage,
+            Pages = source.Pages,
+            ImageAreaFraction = source.ImageAreaFraction,
+        };
 
     // Decodes a supported single-filter image to pixels, or returns null if the filter is unsupported.
     private static DecodedImage? Decode(PdfImageInfo image)

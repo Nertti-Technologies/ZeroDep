@@ -27,14 +27,14 @@ public static class DocumentClassifier
             throw new ArgumentNullException(nameof(thresholds));
         }
 
+        if (IsEncryptedUnreadable(analysis))
+        {
+            return DocumentCategory.EncryptedUnreadable;
+        }
+
         if (analysis.Status == DocumentStatus.Rejected)
         {
             return DocumentCategory.Rejected;
-        }
-
-        if (analysis.Security.IsEncrypted && analysis.Security.Authentication == AuthenticationResult.Failed)
-        {
-            return DocumentCategory.EncryptedUnreadable;
         }
 
         if (analysis.Form.HasAcroForm && analysis.Form.Fields.Count > 0)
@@ -83,6 +83,15 @@ public static class DocumentClassifier
 
         return hasImages ? DocumentCategory.ScannedImageOnly : DocumentCategory.DigitalText;
     }
+
+    /// <summary>
+    /// Whether the document is encrypted and could not be opened: either it was rejected because no
+    /// supplied or default password authenticated it, or its authentication is reported as failed.
+    /// </summary>
+    internal static bool IsEncryptedUnreadable(DocumentAnalysis analysis)
+        => (analysis.Status == DocumentStatus.Rejected
+                && analysis.Rejection?.Reason == RejectionReason.EncryptedPasswordRequired)
+            || (analysis.Security.IsEncrypted && analysis.Security.Authentication == AuthenticationResult.Failed);
 
     /// <summary>Classifies an analyzed document using the default thresholds.</summary>
     /// <param name="analysis">The completed structural analysis.</param>
