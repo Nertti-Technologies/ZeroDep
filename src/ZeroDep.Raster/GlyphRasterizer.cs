@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using ZeroDep.Fonts;
 
 namespace ZeroDep.Raster;
@@ -18,7 +19,11 @@ public static class GlyphRasterizer
     /// <summary>Renders a glyph outline at the given scale (pixels per font unit).</summary>
     /// <param name="outline">The glyph outline (font units).</param>
     /// <param name="scale">Pixels per font unit (e.g. pixelSize / unitsPerEm).</param>
-    /// <param name="subSamples">Vertical supersampling factor (coverage levels for horizontal edges).</param>
+    /// <param name="subSamples">Vertical supersampling factor (coverage levels for horizontal edges), at most 64.</param>
+    /// <exception cref="InvalidDataException">
+    /// The outline has non-finite coordinates, or its bitmap would exceed 8192 pixels in width or height, or
+    /// its scanline work would exceed the fixed limit.
+    /// </exception>
     public static GlyphBitmap Render(GlyphOutline outline, double scale, int subSamples = 8)
     {
         if (outline is null)
@@ -26,22 +31,23 @@ public static class GlyphRasterizer
             throw new ArgumentNullException(nameof(outline));
         }
 
-        if (outline.IsEmpty || scale <= 0)
+        if (outline.IsEmpty || !(scale > 0) || double.IsInfinity(scale))
         {
-            return GlyphBitmap.Empty;
+            return GlyphBitmap.Empty; // NaN, infinite, zero or negative scale draws nothing
         }
 
-        int n = subSamples < 1 ? 1 : subSamples;
+        int n = subSamples < 1 ? 1 : Math.Min(subSamples, Limits.MaxSubSamples);
+        CheckExtent(outline, scale);
 
         // Flatten every contour to device-space polylines (y-down, baseline at y = 0).
         var contours = new List<List<double>>(); // each: x0,y0,x1,y1,... (flattened points)
-        double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+        var bounds = new Bounds();
         foreach (GlyphContour contour in outline.Contours)
         {
             var pts = new List<double>();
             double cx = contour.StartX * scale;
             double cy = -contour.StartY * scale;
-            Add(pts, cx, cy, ref minX, ref minY, ref maxX, ref maxY);
+            Add(pts, cx, cy, bounds);
 
             foreach (GlyphSegment seg in contour.Segments)
             {
@@ -50,13 +56,13 @@ public static class GlyphRasterizer
                 switch (seg.Type)
                 {
                     case SegmentType.Line:
-                        Add(pts, ex, ey, ref minX, ref minY, ref maxX, ref maxY);
+                        Add(pts, ex, ey, bounds);
                         break;
                     case SegmentType.Quadratic:
-                        FlattenQuad(pts, cx, cy, seg.Control1X * scale, -seg.Control1Y * scale, ex, ey, 0, ref minX, ref minY, ref maxX, ref maxY);
+                        FlattenQuad(pts, cx, cy, seg.Control1X * scale, -seg.Control1Y * scale, ex, ey, 0, bounds);
                         break;
                     default:
-                        FlattenCubic(pts, cx, cy, seg.Control1X * scale, -seg.Control1Y * scale, seg.Control2X * scale, -seg.Control2Y * scale, ex, ey, 0, ref minX, ref minY, ref maxX, ref maxY);
+                        FlattenCubic(pts, cx, cy, seg.Control1X * scale, -seg.Control1Y * scale, seg.Control2X * scale, -seg.Control2Y * scale, ex, ey, 0, bounds);
                         break;
                 }
 
@@ -67,11 +73,13 @@ public static class GlyphRasterizer
             contours.Add(pts);
         }
 
+        double minX = bounds.MinX, minY = bounds.MinY, maxX = bounds.MaxX, maxY = bounds.MaxY;
         if (minX > maxX || minY > maxY)
         {
             return GlyphBitmap.Empty;
         }
 
+        // CheckExtent bounded every point to ±MaxOutlineExtent, so these conversions cannot overflow.
         int originX = (int)Math.Floor(minX);
         int originY = (int)Math.Floor(minY);
         int width = (int)Math.Ceiling(maxX) - originX;
@@ -79,6 +87,11 @@ public static class GlyphRasterizer
         if (width <= 0 || height <= 0)
         {
             return GlyphBitmap.Empty;
+        }
+
+        if (width > Limits.MaxGlyphBitmapEdge || height > Limits.MaxGlyphBitmapEdge)
+        {
+            throw new InvalidDataException($"Glyph bitmap of {width}x{height} exceeds the limit of {Limits.MaxGlyphBitmapEdge} pixels per edge.");
         }
 
         // Build edges in bitmap-local coordinates.
@@ -98,7 +111,12 @@ public static class GlyphRasterizer
             }
         }
 
-        var coverage = new float[width * height];
+        if ((long)height * n * edges.Count > Limits.MaxScanlineWork)
+        {
+            throw new InvalidDataException($"Glyph rasterization exceeds the work limit of {Limits.MaxScanlineWork}.");
+        }
+
+        var coverage = new float[(long)width * height];
         double weight = 1.0 / n;
         var crossings = new List<(double X, int Dir)>(16);
 
@@ -146,7 +164,7 @@ public static class GlyphRasterizer
             }
         }
 
-        var bytes = new byte[width * height];
+        var bytes = new byte[(long)width * height];
         for (int i = 0; i < bytes.Length; i++)
         {
             double v = coverage[i];
@@ -155,6 +173,47 @@ public static class GlyphRasterizer
         }
 
         return new GlyphBitmap(width, height, originX, -originY, bytes);
+    }
+
+    // Rejects non-finite coordinates and outlines whose points (control points included) lie beyond
+    // Limits.MaxOutlineExtent device pixels, before any flattening or allocation.
+    private static void CheckExtent(GlyphOutline outline, double scale)
+    {
+        static void Check(double v, double scale)
+        {
+            double d = v * scale;
+            if (double.IsNaN(d) || double.IsInfinity(d))
+            {
+                throw new InvalidDataException("Glyph outline has non-finite coordinates.");
+            }
+
+            if (Math.Abs(d) > Limits.MaxOutlineExtent)
+            {
+                throw new InvalidDataException($"Glyph outline extends beyond {Limits.MaxOutlineExtent} pixels.");
+            }
+        }
+
+        foreach (GlyphContour contour in outline.Contours)
+        {
+            Check(contour.StartX, scale);
+            Check(contour.StartY, scale);
+            foreach (GlyphSegment seg in contour.Segments)
+            {
+                Check(seg.EndX, scale);
+                Check(seg.EndY, scale);
+                if (seg.Type != SegmentType.Line)
+                {
+                    Check(seg.Control1X, scale);
+                    Check(seg.Control1Y, scale);
+                }
+
+                if (seg.Type == SegmentType.Cubic)
+                {
+                    Check(seg.Control2X, scale);
+                    Check(seg.Control2Y, scale);
+                }
+            }
+        }
     }
 
     private static void AddSpan(float[] coverage, int rowBase, double xs, double xe, int width, float weight)
@@ -194,39 +253,54 @@ public static class GlyphRasterizer
         }
     }
 
-    private static void Add(List<double> pts, double x, double y, ref double minX, ref double minY, ref double maxX, ref double maxY)
+    // The running bounding box and the number of flattened points across all contours.
+    private sealed class Bounds
     {
-        pts.Add(x);
-        pts.Add(y);
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
+        public double MinX = double.MaxValue;
+        public double MinY = double.MaxValue;
+        public double MaxX = double.MinValue;
+        public double MaxY = double.MinValue;
+        public long Points;
     }
 
-    private static void FlattenQuad(List<double> pts, double x0, double y0, double cx, double cy, double x1, double y1, int depth, ref double minX, ref double minY, ref double maxX, ref double maxY)
+    private static void Add(List<double> pts, double x, double y, Bounds b)
+    {
+        if (++b.Points > Limits.MaxFlattenedPoints)
+        {
+            throw new InvalidDataException($"Glyph outline flattens to more than {Limits.MaxFlattenedPoints} points.");
+        }
+
+        pts.Add(x);
+        pts.Add(y);
+        if (x < b.MinX) b.MinX = x;
+        if (x > b.MaxX) b.MaxX = x;
+        if (y < b.MinY) b.MinY = y;
+        if (y > b.MaxY) b.MaxY = y;
+    }
+
+    private static void FlattenQuad(List<double> pts, double x0, double y0, double cx, double cy, double x1, double y1, int depth, Bounds b)
     {
         // Flatness: distance of the control point from the chord.
         double d = PointLineDistance(cx, cy, x0, y0, x1, y1);
         if (depth >= MaxSubdivision || d <= FlatTolerance)
         {
-            Add(pts, x1, y1, ref minX, ref minY, ref maxX, ref maxY);
+            Add(pts, x1, y1, b);
             return;
         }
 
         double m01x = (x0 + cx) / 2, m01y = (y0 + cy) / 2;
         double m12x = (cx + x1) / 2, m12y = (cy + y1) / 2;
         double mx = (m01x + m12x) / 2, my = (m01y + m12y) / 2;
-        FlattenQuad(pts, x0, y0, m01x, m01y, mx, my, depth + 1, ref minX, ref minY, ref maxX, ref maxY);
-        FlattenQuad(pts, mx, my, m12x, m12y, x1, y1, depth + 1, ref minX, ref minY, ref maxX, ref maxY);
+        FlattenQuad(pts, x0, y0, m01x, m01y, mx, my, depth + 1, b);
+        FlattenQuad(pts, mx, my, m12x, m12y, x1, y1, depth + 1, b);
     }
 
-    private static void FlattenCubic(List<double> pts, double x0, double y0, double c1x, double c1y, double c2x, double c2y, double x1, double y1, int depth, ref double minX, ref double minY, ref double maxX, ref double maxY)
+    private static void FlattenCubic(List<double> pts, double x0, double y0, double c1x, double c1y, double c2x, double c2y, double x1, double y1, int depth, Bounds b)
     {
         double d = PointLineDistance(c1x, c1y, x0, y0, x1, y1) + PointLineDistance(c2x, c2y, x0, y0, x1, y1);
         if (depth >= MaxSubdivision || d <= FlatTolerance)
         {
-            Add(pts, x1, y1, ref minX, ref minY, ref maxX, ref maxY);
+            Add(pts, x1, y1, b);
             return;
         }
 
@@ -236,8 +310,8 @@ public static class GlyphRasterizer
         double ax = (m01x + m12x) / 2, ay = (m01y + m12y) / 2;
         double bx = (m12x + m23x) / 2, by = (m12y + m23y) / 2;
         double mx = (ax + bx) / 2, my = (ay + by) / 2;
-        FlattenCubic(pts, x0, y0, m01x, m01y, ax, ay, mx, my, depth + 1, ref minX, ref minY, ref maxX, ref maxY);
-        FlattenCubic(pts, mx, my, bx, by, m23x, m23y, x1, y1, depth + 1, ref minX, ref minY, ref maxX, ref maxY);
+        FlattenCubic(pts, x0, y0, m01x, m01y, ax, ay, mx, my, depth + 1, b);
+        FlattenCubic(pts, mx, my, bx, by, m23x, m23y, x1, y1, depth + 1, b);
     }
 
     private static double PointLineDistance(double px, double py, double ax, double ay, double bx, double by)

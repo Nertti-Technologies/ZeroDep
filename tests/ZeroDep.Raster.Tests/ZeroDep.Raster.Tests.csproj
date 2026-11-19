@@ -15,4 +15,8 @@
     <ProjectReference Include="..\..\src\ZeroDep.Raster\ZeroDep.Raster.csproj" />
     <ProjectReference Include="..\..\src\ZeroDep.Fonts\ZeroDep.Fonts.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Crafted font builders and the bounded-run helper, shared with the font tests. -->
+    <Compile Include="..\ZeroDep.Fonts.Tests\CraftedFonts.cs" Link="CraftedFonts.cs" />
+  </ItemGroup>
 </Project>
