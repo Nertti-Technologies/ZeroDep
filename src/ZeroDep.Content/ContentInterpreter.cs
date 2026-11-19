@@ -26,11 +26,25 @@ internal sealed class ContentInterpreter
 
     private readonly Func<PdfObject, PdfObject> _resolve;
     private readonly Func<PdfStream, byte[]> _decode;
+    private readonly ResourceBudget _budget;
+    private readonly long _maxWorkPerPage;
 
+    /// <summary>Creates an interpreter with the default limits and a budget of its own (for standalone use).</summary>
     public ContentInterpreter(Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decode)
+        : this(resolve, decode, new ResourceBudget(PdfLimits.Default))
+    {
+    }
+
+    /// <summary>
+    /// Creates an interpreter that charges every page's work both to the page budget
+    /// (<see cref="PdfLimits.MaxWorkPerPage"/>) and to the document's <paramref name="budget"/>.
+    /// </summary>
+    public ContentInterpreter(Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decode, ResourceBudget budget)
     {
         _resolve = resolve ?? throw new ArgumentNullException(nameof(resolve));
         _decode = decode ?? throw new ArgumentNullException(nameof(decode));
+        _budget = budget ?? throw new ArgumentNullException(nameof(budget));
+        _maxWorkPerPage = budget.Limits.MaxWorkPerPage;
     }
 
     /// <summary>Runs the interpreter and returns image placements only (back-compat for DPI).</summary>
@@ -38,39 +52,52 @@ internal sealed class ContentInterpreter
         => RunAll(content, resources, initial).Images;
 
     /// <summary>
-    /// Runs the interpreter and returns both images and text runs. Throws <see cref="PdfSyntaxException"/>
-    /// when the page exceeds the work budget (<see cref="Limits.MaxWorkPerPage"/>) or nests operands deeper
-    /// than <see cref="Limits.MaxOperandDepth"/>.
+    /// Runs the interpreter and returns both images and text runs. Throws <see cref="PdfLimitExceededException"/>
+    /// when the page exceeds its work budget (<c>MaxWorkPerPage</c>), the document exceeds its work budget
+    /// (<c>MaxWorkPerDocument</c>), or operands nest deeper than <see cref="Limits.MaxOperandDepth"/>.
     /// </summary>
     public ContentResult RunAll(byte[] content, PdfDictionary resources, Matrix initial)
     {
         var result = new ContentResult();
-        Execute(content, resources, initial, result, 0, new RunState(MaxWorkPerPage));
+        Execute(content, resources, initial, result, 0, new RunState(MaxWorkPerPage, _budget));
         return result;
     }
 
-    // The page work budget; tests lower it to exercise the limit cheaply. Phase 2 sets it from the caller's limits.
-    internal long MaxWorkPerPage { get; init; } = Limits.MaxWorkPerPage;
+    // The page work budget, from the caller's limits; tests may lower it directly to exercise the limit cheaply.
+    internal long MaxWorkPerPage
+    {
+        get => _maxWorkPerPage;
+        init => _maxWorkPerPage = value;
+    }
 
-    // State shared by one page run across nested Form XObjects: the work budget, the forms on the call
+    // State shared by one page run across nested Form XObjects: the work budgets, the forms on the call
     // stack (a form that invokes itself is skipped), and the decoded content of forms and the fonts
     // (by object number) already loaded, so repeated form runs do not repeat that work.
     private sealed class RunState
     {
         private readonly long _maxWork;
+        private readonly ResourceBudget _document;
         public long Work;
         public readonly HashSet<int> ActiveForms = new HashSet<int>();
         public readonly Dictionary<int, byte[]> FormContent = new Dictionary<int, byte[]>();
         public readonly Dictionary<int, FontInfo?> Fonts = new Dictionary<int, FontInfo?>();
 
-        public RunState(long maxWork) => _maxWork = maxWork;
+        public RunState(long maxWork, ResourceBudget document)
+        {
+            _maxWork = maxWork;
+            _document = document;
+        }
 
+        // Every unit counts against both the page and the document. The document is charged first, so when
+        // both are exceeded the breach that ends the whole document is the one reported.
         public void Charge(long units)
         {
+            _document.Charge(units);
             Work += units;
             if (Work > _maxWork)
             {
-                throw new PdfSyntaxException($"Page content exceeds the work limit of {_maxWork}.");
+                throw new PdfLimitExceededException(
+                    nameof(PdfLimits.MaxWorkPerPage), _maxWork, $"Page content exceeds the work limit of {_maxWork}.");
             }
         }
     }
@@ -274,7 +301,7 @@ internal sealed class ContentInterpreter
                         fontSize = NumAt(operands, 1);
                         if (operands[operands.Count - 2] is PdfName fontName)
                         {
-                            font = ResolveFont(fontName.Value, resources, fontCache, state);
+                            font = ResolveFont(fontName.Value, resources, fontCache, state, result);
                             result.FontNames.Add(fontName.Value);
                         }
                     }
@@ -405,7 +432,7 @@ internal sealed class ContentInterpreter
         }
     }
 
-    private FontInfo? ResolveFont(string name, PdfDictionary resources, Dictionary<string, FontInfo?> cache, RunState state)
+    private FontInfo? ResolveFont(string name, PdfDictionary resources, Dictionary<string, FontInfo?> cache, RunState state, ContentResult result)
     {
         if (cache.TryGetValue(name, out FontInfo? cached)) return cached;
 
@@ -422,7 +449,8 @@ internal sealed class ContentInterpreter
             {
                 if (_resolve(entry ?? PdfNull.Instance) is PdfDictionary fontDict)
                 {
-                    font = new FontInfo(fontDict, _resolve, _decode);
+                    font = new FontInfo(fontDict, _resolve, _decode, _budget.Limits.MaxCMapEntries);
+                    if (font.MapLimitExceeded) result.FontMapLimitExceeded = true;
 
                     // Building a font's maps allocates per entry: charge it to the page budget.
                     state.Charge(1 + (font.MapEntryCount * Limits.WorkPerMapEntry));
@@ -464,7 +492,8 @@ internal sealed class ContentInterpreter
     {
         if (depth > Limits.MaxOperandDepth)
         {
-            throw new PdfSyntaxException($"Content operand nesting exceeds the limit of {Limits.MaxOperandDepth}.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxOperandDepth), Limits.MaxOperandDepth, $"Content operand nesting exceeds the limit of {Limits.MaxOperandDepth}.");
         }
 
         switch (token.Type)

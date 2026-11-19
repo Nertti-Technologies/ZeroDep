@@ -92,8 +92,9 @@ public abstract class PdfFunction
     /// <param name="decodeStream">Decodes a stream's filters to its raw bytes (for Type 0 and Type 4).</param>
     /// <exception cref="NotSupportedException">The function type is unsupported or its entries are malformed.</exception>
     /// <exception cref="PdfSyntaxException">
-    /// The function nests deeper than the fixed limit, refers back to itself, has too many sub-functions,
-    /// or (Type 4) nests braces deeper than the fixed limit.
+    /// The function refers back to itself; or it nests deeper than the fixed limit, has too many
+    /// sub-functions, or (Type 4) nests braces deeper than the fixed limit, reported as the derived
+    /// <see cref="PdfLimitExceededException"/>.
     /// </exception>
     public static PdfFunction Parse(PdfObject obj, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream)
     {
@@ -122,12 +123,14 @@ public abstract class PdfFunction
     {
         if (depth > Limits.MaxFunctionDepth)
         {
-            throw new PdfSyntaxException($"Function nesting exceeds the limit of {Limits.MaxFunctionDepth}.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxFunctionDepth), Limits.MaxFunctionDepth, $"Function nesting exceeds the limit of {Limits.MaxFunctionDepth}.");
         }
 
         if (++ctx.Nodes > Limits.MaxFunctionNodes)
         {
-            throw new PdfSyntaxException($"Function has more than {Limits.MaxFunctionNodes} sub-functions.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxFunctionNodes), Limits.MaxFunctionNodes, $"Function has more than {Limits.MaxFunctionNodes} sub-functions.");
         }
 
         int objectNumber = obj is PdfReference reference ? reference.ObjectNumber : -1;

@@ -26,7 +26,7 @@ public sealed class ResourceLimitTests
         };
         byte[] pdf = Classic(objects);
 
-        var ex = Bounded.Throws<PdfSyntaxException>(() =>
+        var ex = Bounded.Throws<PdfLimitExceededException>(() =>
         {
             using PdfFile file = Open(pdf);
             file.GetObject(1);
@@ -44,7 +44,7 @@ public sealed class ResourceLimitTests
         };
         byte[] pdf = Classic(objects);
 
-        Bounded.Throws<PdfSyntaxException>(() =>
+        Bounded.Throws<PdfLimitExceededException>(() =>
         {
             using PdfFile file = Open(pdf);
             file.GetObject(1);
@@ -61,7 +61,7 @@ public sealed class ResourceLimitTests
         }
 
         Assert.IsType<PdfArray>(Parse(Limits.MaxNestingDepth));
-        Assert.Throws<PdfSyntaxException>(() => Parse(Limits.MaxNestingDepth + 1));
+        Assert.Equal("MaxNestingDepth", Assert.Throws<PdfLimitExceededException>(() => Parse(Limits.MaxNestingDepth + 1)).LimitName);
     }
 
     // ---- object streams ----

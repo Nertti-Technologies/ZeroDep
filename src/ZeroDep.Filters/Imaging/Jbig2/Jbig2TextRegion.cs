@@ -72,7 +72,10 @@ internal static class Jbig2TextRegion
         p += 4;
         if (numInstances < 0 || numInstances > Limits.MaxJbig2TextInstances)
         {
-            throw new InvalidDataException($"JBIG2 text region declares more than {Limits.MaxJbig2TextInstances} instances.");
+            throw DecoderBoundary.FixedLimit(
+                nameof(Limits.MaxJbig2TextInstances),
+                Limits.MaxJbig2TextInstances,
+                $"JBIG2 text region declares more than {Limits.MaxJbig2TextInstances} instances.");
         }
 
         int sbStrips = 1 << logStrips;

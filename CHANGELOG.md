@@ -13,6 +13,20 @@ All notable changes to **ZeroDep** are documented here. The format follows
   (BSD-2-Clause) and a glyph-name list subset (BSD-3-Clause). The file is generated from `third-party/` by
   `build/generate-notices.sh`, and CI fails when it is out of date.
 
+
+- **Configurable resource limits.** New `PdfLimits` (decoded stream size, image pixels, work per page and per
+  document, form fields, font map entries) with the previous fixed values as defaults, set through the new
+  `AnalyzerOptions.Limits`. Every `PdfAnalyzer` method gains an `(Stream, AnalyzerOptions)` overload, the
+  public stream and image decoders and `ColorConverter.ToRgb` gain a `PdfLimits` overload, and the existing
+  overloads keep their behaviour.
+- **`PdfLimitExceededException`**, derived from `PdfSyntaxException`, with `LimitName` and `Limit`. Public
+  decoders still throw `InvalidDataException` and carry it as the inner exception.
+- **`RejectionReason.ResourceLimitExceeded`** for documents rejected because a limit was hit.
+- **Incomplete pages.** `PageClassification.Incomplete` and `IncompleteReasons` mark a page whose content was
+  only partly read because of a limit or unreadable content; both are emitted in the JSON, whose schema
+  version is now 1.3.
+- A document-wide work budget now also counts object reads, so the total effort for one file is bounded.
+
 ### Changed
 
 - **Target frameworks are now `netstandard2.0`, `net10.0` and `net11.0`.** `net11.0` is added. `net8.0` is
@@ -31,8 +45,7 @@ All notable changes to **ZeroDep** are documented here. The format follows
 - **Bounded processing of malformed input.** Parsing, stream and image decoding, colour conversion, content
   interpretation and font handling now enforce fixed limits on nesting depth, decoded size, pixel count and
   work, and detect reference cycles. An input that exceeds a limit is rejected, or the affected page, image
-  or glyph is skipped, instead of exhausting the stack, memory or CPU. The limits are internal constants in
-  this release.
+  or glyph is skipped, instead of exhausting the stack, memory or CPU.
 - **Exception contract.** `PdfAnalyzer.Analyze` and `ToJson` report any non-fatal failure as a `Rejected`
   result. The extraction methods throw only `PdfSyntaxException` for bad input, `PdfDocument.Open` likewise,
   and the public stream and image decoders throw only `InvalidDataException` or `NotSupportedException`.

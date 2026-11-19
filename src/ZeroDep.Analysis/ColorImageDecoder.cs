@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZeroDep.Abstractions;
 using ZeroDep.Color;
 using ZeroDep.Filters;
 using ZeroDep.Filters.Jbig2;
@@ -38,8 +39,16 @@ internal static class ColorImageDecoder
 
     public static IReadOnlyList<ColorImage> Extract(
         Stream stream, string? password = null, int maxImages = int.MaxValue, Func<string?, bool>? shouldDecode = null)
+        => Extract(stream, password, PdfLimits.Default, maxImages, shouldDecode);
+
+    /// <summary>
+    /// Decodes the document's images within <paramref name="limits"/>. An image that cannot be decoded, or
+    /// exceeds a limit, is skipped; a breach of the document work budget ends the extraction.
+    /// </summary>
+    public static IReadOnlyList<ColorImage> Extract(
+        Stream stream, string? password, PdfLimits limits, int maxImages = int.MaxValue, Func<string?, bool>? shouldDecode = null)
     {
-        using PdfDocument document = PdfDocument.Open(stream, password);
+        using PdfDocument document = PdfDocument.Open(stream, password, limits);
         var result = new List<ColorImage>();
         int attempted = 0;
 
@@ -82,7 +91,7 @@ internal static class ColorImageDecoder
                 {
                     (rgb, family) = DecodeImage(document, image, resources, shouldDecode);
                 }
-                catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+                catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
                 {
                     continue; // an undecodable image is isolated, never aborts the document
                 }
@@ -119,8 +128,9 @@ internal static class ColorImageDecoder
         // Apply the colour space + /Decode when the codec yielded raw components (count matches the colour
         // space) — Indexed palette, Separation/DeviceN tint, gray/RGB /Decode. When the codec already
         // colour-transformed (e.g. a CMYK JPEG collapsed to RGB), the counts differ and we pass through.
+        PdfLimits limits = document.Limits;
         RasterImage Normalize(RasterImage dec)
-            => cs is not null && dec.Components == cs.ComponentCount ? ColorConverter.ToRgb(dec, cs, decode) : dec;
+            => cs is not null && dec.Components == cs.ComponentCount ? ColorConverter.ToRgb(dec, limits, cs, decode) : dec;
 
         switch (filter)
         {
@@ -129,17 +139,17 @@ internal static class ColorImageDecoder
                 // Preserve CMYK (4-comp) so the colour space + /Decode apply (Adobe polynomial); a
                 // 3-comp DeviceRGB/Gray JPEG is already colour-transformed.
                 bool preserveCmyk = cs is not null && cs.ComponentCount == 4;
-                return (Normalize(JpegDecoder.Decode(image.GetRawBytes(), preserveCmyk)), family);
+                return (Normalize(JpegDecoder.Decode(image.GetRawBytes(), limits, preserveCmyk)), family);
             }
 
             case "CCITTFaxDecode":
-                return (Normalize(CcittFaxDecode.Decode(image.GetRawBytes(), CcittParamsOf(document, dict, w, h))), family);
+                return (Normalize(CcittFaxDecode.Decode(image.GetRawBytes(), limits, CcittParamsOf(document, dict, w, h))), family);
 
             case "JBIG2Decode":
-                return (Normalize(Jbig2Decode.Decode(image.GetRawBytes(), Jbig2GlobalsOf(document, dict), w, h)), family);
+                return (Normalize(Jbig2Decode.Decode(image.GetRawBytes(), limits, Jbig2GlobalsOf(document, dict), w, h)), family);
 
             case "JPXDecode":
-                return (Normalize(JpxDecode.Decode(image.GetRawBytes(), w, h)), family);
+                return (Normalize(JpxDecode.Decode(image.GetRawBytes(), limits, w, h)), family);
 
             default:
             {
@@ -149,8 +159,8 @@ internal static class ColorImageDecoder
                     return (null, family);
                 }
 
-                byte[] packed = StreamDecoder.Decode(image);
-                return (ColorConverter.ToRgb(packed, w, h, cs.ComponentCount, bpc > 0 ? bpc : 8, cs, decode), family);
+                byte[] packed = document.Decode(image);
+                return (ColorConverter.ToRgb(packed, limits, w, h, cs.ComponentCount, bpc > 0 ? bpc : 8, cs, decode), family);
             }
         }
     }
@@ -168,7 +178,7 @@ internal static class ColorImageDecoder
             PdfObject? NamedLookup(string n)
                 => document.Resolve(resources["ColorSpace"] ?? PdfNull.Instance) is PdfDictionary d ? d[n] : null;
 
-            return PdfColorSpace.Resolve(csObj, o => document.Resolve(o), s => StreamDecoder.Decode(s), NamedLookup);
+            return PdfColorSpace.Resolve(csObj, o => document.Resolve(o), document.Decode, NamedLookup);
         }
         catch (NotSupportedException)
         {
@@ -209,9 +219,9 @@ internal static class ColorImageDecoder
             {
                 try
                 {
-                    return StreamDecoder.Decode(globals);
+                    return document.Decode(globals);
                 }
-                catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+                catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
                 {
                     return null;
                 }

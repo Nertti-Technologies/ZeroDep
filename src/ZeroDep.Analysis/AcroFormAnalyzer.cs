@@ -18,9 +18,12 @@ internal static class AcroFormAnalyzer
     private const int MaxDepth = 50;
 
     /// <summary>Opens a PDF stream and extracts its AcroForm fields.</summary>
-    public static AcroFormReport Analyze(Stream stream, string? password = null)
+    public static AcroFormReport Analyze(Stream stream, string? password = null) => Analyze(stream, password, PdfLimits.Default);
+
+    /// <summary>Opens a PDF stream within <paramref name="limits"/> and extracts its AcroForm fields.</summary>
+    public static AcroFormReport Analyze(Stream stream, string? password, PdfLimits limits)
     {
-        using PdfDocument document = PdfDocument.Open(stream, password);
+        using PdfDocument document = PdfDocument.Open(stream, password, limits);
         return Analyze(document);
     }
 
@@ -76,9 +79,11 @@ internal static class AcroFormAnalyzer
         int? objectNumber = nodeRef is PdfReference reference ? reference.ObjectNumber : (int?)null;
         if (objectNumber.HasValue && !walk.Visited.Add(objectNumber.Value)) return;
 
-        if (++walk.NodeCount > Limits.MaxFormFields)
+        int maxFields = walk.Document.Limits.MaxFormFields;
+        if (++walk.NodeCount > maxFields)
         {
-            throw new PdfSyntaxException($"AcroForm field limit exceeded ({Limits.MaxFormFields} fields).");
+            throw new PdfLimitExceededException(
+                nameof(PdfLimits.MaxFormFields), maxFields, $"AcroForm field limit exceeded ({maxFields} fields).");
         }
 
         PdfDocument document = walk.Document;

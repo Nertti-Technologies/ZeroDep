@@ -2,8 +2,11 @@ using System;
 
 namespace ZeroDep.Abstractions;
 
-/// <summary>Thrown when PDF byte syntax cannot be parsed into a valid object structure.</summary>
-public sealed class PdfSyntaxException : Exception
+/// <summary>
+/// Thrown when PDF byte syntax cannot be parsed into a valid object structure. The derived
+/// <see cref="PdfLimitExceededException"/> reports a document that exceeds a resource limit.
+/// </summary>
+public class PdfSyntaxException : Exception
 {
     /// <summary>Initializes a new instance.</summary>
     public PdfSyntaxException()

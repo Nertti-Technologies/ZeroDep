@@ -69,13 +69,13 @@ public sealed class AnalysisLimitTests
         Assert.Equal(new[] { "p.x", "p.y" }, report.Fields.Select(f => f.FullyQualifiedName).ToArray());
     }
 
-    // More field nodes than the budget: the walk stops with a PdfSyntaxException naming the limit, and the
+    // More field nodes than the budget: the walk stops with a PdfLimitExceededException naming the limit, and the
     // unified analysis reports a rejection instead of throwing.
     [Fact]
     public void AcroForm_OverFieldBudget_IsRejected()
     {
         var kids = new StringBuilder();
-        for (int i = 0; i <= Limits.MaxFormFields; i++)
+        for (int i = 0; i <= PdfLimits.Default.MaxFormFields; i++)
         {
             kids.Append("<</T(f)>>");
         }
@@ -86,13 +86,14 @@ public sealed class AnalysisLimitTests
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
             $"<< /T (root) /FT /Tx /Kids [{kids}] >>");
 
-        PdfSyntaxException ex = RunBounded(() =>
-            Assert.Throws<PdfSyntaxException>(() => AcroFormAnalyzer.Analyze(new MemoryStream(pdf))));
+        PdfLimitExceededException ex = RunBounded(() =>
+            Assert.Throws<PdfLimitExceededException>(() => AcroFormAnalyzer.Analyze(new MemoryStream(pdf))));
         Assert.Contains("field limit", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(nameof(PdfLimits.MaxFormFields), ex.LimitName);
 
         DocumentAnalysis analysis = RunBounded(() => DocumentAnalyzer.Analyze(new MemoryStream(pdf), 150));
         Assert.Equal(DocumentStatus.Rejected, analysis.Status);
-        Assert.Equal(RejectionReason.MalformedObject, analysis.Rejection!.Reason);
+        Assert.Equal(RejectionReason.ResourceLimitExceeded, analysis.Rejection!.Reason);
     }
 
     // An object stream with /N -1 made the engine throw a non-syntax exception out of Analyze.

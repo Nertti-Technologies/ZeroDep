@@ -32,4 +32,11 @@ public enum RejectionReason
     /// password authenticated it — a password is required to open it.
     /// </summary>
     EncryptedPasswordRequired,
+
+    /// <summary>
+    /// The document needs more than a resource limit allows: a <see cref="PdfLimits"/> budget such as the
+    /// document work budget, or a fixed structural limit such as the object nesting depth. See
+    /// <see cref="PdfLimitExceededException"/>.
+    /// </summary>
+    ResourceLimitExceeded,
 }

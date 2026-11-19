@@ -28,7 +28,8 @@ internal static class PageClassifier
         IReadOnlyList<TextRunInfo> textRuns,
         IReadOnlyList<ImageDpiInfo> images,
         AcroFormReport form,
-        IReadOnlyList<PageStructure> pageStructures)
+        IReadOnlyList<PageStructure> pageStructures,
+        PageIncompleteness? incomplete = null)
     {
         var runsByPage = Group(textRuns, r => r.PageIndex);
         var imagesByPage = Group(images, i => i.PageIndex);
@@ -60,12 +61,15 @@ internal static class PageClassifier
             PageSignals signals = BuildSignals(runs, pageImages, fields, structure, pageArea);
             (PageContentClass cls, double confidence) = Decide(signals, pageImages?.Count ?? 0);
 
+            IReadOnlyList<string> reasons = incomplete?.ReasonsFor(p) ?? Array.Empty<string>();
             result.Add(new PageClassification
             {
                 PageIndex = p,
                 Class = cls,
                 Confidence = Math.Round(confidence, 2, MidpointRounding.AwayFromZero),
                 Signals = signals,
+                Incomplete = reasons.Count > 0,
+                IncompleteReasons = reasons,
             });
         }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZeroDep.Abstractions;
 
 namespace ZeroDep.Filters.Jpx;
 
@@ -14,24 +15,45 @@ namespace ZeroDep.Filters.Jpx;
 /// </summary>
 public static class JpxDecode
 {
-    /// <summary>Decodes a JPEG 2000 codestream (raw or JP2-boxed) to a raster.</summary>
+    /// <summary>Decodes a JPEG 2000 codestream (raw or JP2-boxed) to a raster, within the default <see cref="PdfLimits"/>.</summary>
     /// <param name="data">The embedded <c>/JPXDecode</c> bytes.</param>
     /// <param name="width">The PDF <c>/Width</c> (used only as a fallback if the codestream omits SIZ).</param>
     /// <param name="height">The PDF <c>/Height</c> (fallback only).</param>
     /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
     /// <exception cref="InvalidDataException">The codestream is malformed, its size exceeds the decode budget, or it disagrees with the PDF size.</exception>
     /// <exception cref="NotSupportedException">The data is not a JPEG 2000 codestream.</exception>
-    public static RasterImage Decode(byte[] data, int width, int height)
+    public static RasterImage Decode(byte[] data, int width, int height) => Decode(data, PdfLimits.Default, width, height);
+
+    /// <summary>Decodes a JPEG 2000 codestream (raw or JP2-boxed) to a raster, within <paramref name="limits"/>.</summary>
+    /// <param name="data">The embedded <c>/JPXDecode</c> bytes.</param>
+    /// <param name="limits">
+    /// The limits to apply: the image may have at most <see cref="PdfLimits.MaxImagePixels"/> pixels, and its
+    /// decode may use at most 4 bytes of working memory per pixel of that limit.
+    /// </param>
+    /// <param name="width">The PDF <c>/Width</c> (used only as a fallback if the codestream omits SIZ).</param>
+    /// <param name="height">The PDF <c>/Height</c> (fallback only).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> or <paramref name="limits"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The codestream is malformed or disagrees with the PDF size; or it exceeds a limit, in which case the
+    /// inner exception is a <see cref="PdfLimitExceededException"/> naming the limit.
+    /// </exception>
+    /// <exception cref="NotSupportedException">The data is not a JPEG 2000 codestream.</exception>
+    public static RasterImage Decode(byte[] data, PdfLimits limits, int width, int height)
     {
         if (data is null)
         {
             throw new ArgumentNullException(nameof(data));
         }
 
-        return DecoderBoundary.Run(() => DecodeCore(data, width, height), "JPXDecode");
+        if (limits is null)
+        {
+            throw new ArgumentNullException(nameof(limits));
+        }
+
+        return DecoderBoundary.Run(() => DecodeCore(data, width, height, limits), "JPXDecode");
     }
 
-    private static RasterImage DecodeCore(byte[] data, int width, int height)
+    private static RasterImage DecodeCore(byte[] data, int width, int height, PdfLimits limits)
     {
         JpxImage image = JpxCodestream.Parse(data);
         JpxSiz siz = image.Siz;
@@ -40,11 +62,11 @@ public static class JpxDecode
         int h = siz.Height > 0 ? siz.Height : height;
         if (comps == 0 || w <= 0 || h <= 0)
         {
-            return Blank(width, height);
+            return Blank(width, height, limits);
         }
 
         int outComps = comps >= 3 ? 3 : 1;
-        CheckBudget(image, siz, w, h, comps, outComps, width, height);
+        CheckBudget(image, siz, w, h, comps, outComps, width, height, limits);
         var channels = new byte[outComps][];
         for (int i = 0; i < outComps; i++)
         {
@@ -66,7 +88,7 @@ public static class JpxDecode
 
         if (byTile.Count == 0)
         {
-            return Blank(w, h);
+            return Blank(w, h, limits);
         }
 
         foreach (KeyValuePair<int, List<JpxTilePart>> kv in byTile)
@@ -85,19 +107,20 @@ public static class JpxDecode
     }
 
     // Rejects sizes whose decode would exceed the image budgets, before anything is allocated.
-    private static void CheckBudget(JpxImage image, JpxSiz siz, int w, int h, int comps, int outComps, int pdfWidth, int pdfHeight)
+    private static void CheckBudget(JpxImage image, JpxSiz siz, int w, int h, int comps, int outComps, int pdfWidth, int pdfHeight, PdfLimits limits)
     {
         long pixels = (long)w * h;
-        if (pixels > Limits.MaxImagePixels)
+        if (pixels > limits.MaxImagePixels)
         {
-            throw new InvalidDataException($"JPEG 2000 image of {w}x{h} exceeds the {Limits.MaxImagePixels} pixel limit.");
+            throw DecoderBoundary.PixelLimit("JPEG 2000 image", w, h, limits);
         }
 
         // The output canvases (one byte per channel), plus the interleaved copy for colour.
+        long workingSet = DecoderBoundary.WorkingSetBytes(limits);
         long canvasBytes = pixels * outComps * (outComps == 1 ? 1 : 2);
-        if (canvasBytes > Limits.MaxDecodeWorkingSetBytes)
+        if (canvasBytes > workingSet)
         {
-            throw new InvalidDataException($"JPEG 2000 image of {w}x{h} exceeds the decode memory budget.");
+            throw DecoderBoundary.WorkingSetLimit($"JPEG 2000 image of {w}x{h}", limits);
         }
 
         if (pdfWidth > 0 && pdfHeight > 0
@@ -112,9 +135,9 @@ public static class JpxDecode
         long tileH = Math.Min(siz.YTsiz > 0 ? siz.YTsiz : h, h);
         long samples = tileW * tileH * comps;
         long perBlockArea = Limits.JpxBytesPerCodeBlock / MinCodeBlockArea(image);
-        if (samples * (Limits.JpxBytesPerSample + Math.Max(1, perBlockArea)) > Limits.MaxDecodeWorkingSetBytes)
+        if (samples * (Limits.JpxBytesPerSample + Math.Max(1, perBlockArea)) > workingSet)
         {
-            throw new InvalidDataException($"JPEG 2000 tile of {tileW}x{tileH}x{comps} exceeds the decode memory budget.");
+            throw DecoderBoundary.WorkingSetLimit($"JPEG 2000 tile of {tileW}x{tileH}x{comps}", limits);
         }
     }
 
@@ -510,13 +533,13 @@ public static class JpxDecode
         return new RasterImage { Width = w, Height = h, Components = 3, Samples = samples };
     }
 
-    private static RasterImage Blank(int width, int height)
+    private static RasterImage Blank(int width, int height, PdfLimits limits)
     {
         int w = Math.Max(1, width);
         int h = Math.Max(1, height);
-        if ((long)w * h > Limits.MaxImagePixels)
+        if ((long)w * h > limits.MaxImagePixels)
         {
-            throw new InvalidDataException($"Image of {w}x{h} exceeds the {Limits.MaxImagePixels} pixel limit.");
+            throw DecoderBoundary.PixelLimit("Image", w, h, limits);
         }
 
         var samples = new byte[w * h];

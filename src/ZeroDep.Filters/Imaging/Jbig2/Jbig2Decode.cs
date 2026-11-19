@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZeroDep.Abstractions;
 
 namespace ZeroDep.Filters.Jbig2;
 
@@ -29,26 +30,50 @@ public static class Jbig2Decode
     /// <param name="height">The image height (PDF <c>/Height</c>).</param>
     /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
     /// <exception cref="InvalidDataException">The page size exceeds the pixel limit, or the data is malformed.</exception>
+    /// <remarks>Uses the default <see cref="PdfLimits"/>.</remarks>
     public static RasterImage Decode(byte[] data, byte[]? globals, int width, int height)
+        => Decode(data, PdfLimits.Default, globals, width, height);
+
+    /// <summary>Decodes a JBIG2 image to a raster of the given pixel dimensions, within <paramref name="limits"/>.</summary>
+    /// <param name="data">The embedded JBIG2 segment stream.</param>
+    /// <param name="limits">
+    /// The limits to apply: the page may have at most <see cref="PdfLimits.MaxImagePixels"/> pixels, and all the
+    /// bitmaps of one decode together at most twice that.
+    /// </param>
+    /// <param name="globals">The optional decoded <c>JBIG2Globals</c> segment stream, or null.</param>
+    /// <param name="width">The image width (PDF <c>/Width</c>).</param>
+    /// <param name="height">The image height (PDF <c>/Height</c>).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> or <paramref name="limits"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The data is malformed; or the page size exceeds the pixel limit, in which case the inner exception is a
+    /// <see cref="PdfLimitExceededException"/> naming the limit. A segment that exceeds a limit is skipped.
+    /// </exception>
+    public static RasterImage Decode(byte[] data, PdfLimits limits, byte[]? globals, int width, int height)
     {
         if (data is null)
         {
             throw new ArgumentNullException(nameof(data));
         }
 
-        return DecoderBoundary.Run(() => DecodeCore(data, globals, width, height), "JBIG2Decode");
+        if (limits is null)
+        {
+            throw new ArgumentNullException(nameof(limits));
+        }
+
+        return DecoderBoundary.Run(() => DecodeCore(data, globals, width, height, limits), "JBIG2Decode");
     }
 
-    private static RasterImage DecodeCore(byte[] data, byte[]? globals, int width, int height)
+    private static RasterImage DecodeCore(byte[] data, byte[]? globals, int width, int height, PdfLimits limits)
     {
         // Every bitmap of this decode draws on one allowance of twice the pixel limit: the page, then each
         // region, symbol and symbol placement. A segment that overdraws it is skipped like a malformed one.
-        if ((long)Math.Max(0, width) * Math.Max(0, height) > Limits.MaxImagePixels)
+        if ((long)Math.Max(0, width) * Math.Max(0, height) > limits.MaxImagePixels)
         {
-            throw new InvalidDataException($"JBIG2 page of {width}x{height} exceeds the {Limits.MaxImagePixels} pixel limit.");
+            throw DecoderBoundary.PixelLimit("JBIG2 page", width, height, limits);
         }
 
-        var budget = new PixelBudget(2 * Limits.MaxImagePixels);
+        long allowance = limits.MaxImagePixels > long.MaxValue / 2 ? long.MaxValue : 2 * limits.MaxImagePixels;
+        var budget = new PixelBudget(allowance, limits);
         budget.Charge(width, height, "JBIG2 page");
         var page = new Jbig2Bitmap(width, height);
         var symbolDicts = new Dictionary<long, List<Jbig2Bitmap>>();
@@ -278,7 +303,8 @@ public static class Jbig2Decode
             {
                 if (symbols.Count + dict.Count > Limits.MaxJbig2Symbols)
                 {
-                    throw new InvalidDataException($"JBIG2 symbol set exceeds {Limits.MaxJbig2Symbols} symbols.");
+                    throw DecoderBoundary.FixedLimit(
+                        nameof(Limits.MaxJbig2Symbols), Limits.MaxJbig2Symbols, $"JBIG2 symbol set exceeds {Limits.MaxJbig2Symbols} symbols.");
                 }
 
                 symbols.AddRange(dict);

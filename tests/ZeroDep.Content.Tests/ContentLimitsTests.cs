@@ -41,7 +41,7 @@ public sealed class ContentLimitsTests
     {
         string content = string.Concat(Enumerable.Repeat(open, 100_000)) + tail;
         Exception? ex = Bounded.Run(() => Interpreter().RunAll(B(content), Dict(), Matrix.Identity));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxOperandDepth", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]
@@ -49,7 +49,7 @@ public sealed class ContentLimitsTests
     {
         string content = "BI /D " + new string('[', 100_000) + " ID x EI";
         Exception? ex = Bounded.Run(() => Interpreter().RunAll(B(content), Dict(), Matrix.Identity));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxOperandDepth", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed class ContentLimitsTests
         PdfDictionary pageRes = Dict(("XObject", Dict(("F", Ref(100)))));
 
         Exception? ex = Bounded.Run(() => interp.RunAll(B("/F Do"), pageRes, Matrix.Identity), maxBytes: 512L * 1024 * 1024);
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxWorkPerPage", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
         Assert.True(decodes <= Levels, $"each form is decoded once per page, saw {decodes} decodes");
     }
 
@@ -164,7 +164,7 @@ public sealed class ContentLimitsTests
         sb.Append("endbfrange\nendcmap\n");
 
         Exception? ex = Bounded.Run(() => ToUnicodeCMap.Parse(B(sb.ToString())));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxCMapEntries", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]

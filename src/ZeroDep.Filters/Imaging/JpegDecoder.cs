@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZeroDep.Abstractions;
 
 namespace ZeroDep.Filters;
 
@@ -28,56 +29,67 @@ public static partial class JpegDecoder
     private static readonly double[,] Cos = BuildCosLut();
     private static readonly double[] Cu = BuildCuLut();
 
-    /// <summary>Decodes a baseline JPEG into a <see cref="RasterImage"/>.</summary>
+    /// <summary>Decodes a baseline JPEG into a <see cref="RasterImage"/>, within the default <see cref="PdfLimits"/>.</summary>
     /// <param name="data">The raw JPEG bytes (a <c>/DCTDecode</c> image stream).</param>
     /// <returns>The decoded image (1 or 3 components).</returns>
     /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
-    /// <exception cref="InvalidDataException">The JPEG is malformed.</exception>
+    /// <exception cref="InvalidDataException">The JPEG is malformed or exceeds the decode budget.</exception>
     /// <exception cref="NotSupportedException">The JPEG uses an unsupported process or component count.</exception>
-    public static RasterImage Decode(byte[] data)
-    {
-        if (data is null)
-        {
-            throw new ArgumentNullException(nameof(data));
-        }
-
-        return DecoderBoundary.Run(
-            () =>
-            {
-                PlaneSet planes = DecodeToPlanes(data);
-                return Combine(planes.Meta, planes.Planes, planes.PlaneW, planes.HMax, planes.VMax);
-            },
-            "JPEG");
-    }
+    public static RasterImage Decode(byte[] data) => Decode(data, PdfLimits.Default, preserveCmyk: false);
 
     /// <summary>
     /// Decodes a JPEG, optionally preserving 4-component (CMYK/YCCK) images as a 4-component CMYK raster
     /// (true, un-inverted inks) instead of collapsing them to RGB — so a colour-managed caller can apply
-    /// the PDF colour space and <c>/Decode</c>. 1- and 3-component images are unaffected.
+    /// the PDF colour space and <c>/Decode</c>. 1- and 3-component images are unaffected. Uses the default
+    /// <see cref="PdfLimits"/>.
     /// </summary>
     /// <param name="data">The raw JPEG bytes (a <c>/DCTDecode</c> image stream).</param>
     /// <param name="preserveCmyk">When true, 4-component JPEGs are returned as 4-component CMYK.</param>
     /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
     /// <exception cref="InvalidDataException">The JPEG is malformed or exceeds the decode budget.</exception>
     /// <exception cref="NotSupportedException">The JPEG uses an unsupported process or component count.</exception>
-    public static RasterImage Decode(byte[] data, bool preserveCmyk)
+    public static RasterImage Decode(byte[] data, bool preserveCmyk) => Decode(data, PdfLimits.Default, preserveCmyk);
+
+    /// <summary>
+    /// Decodes a JPEG within <paramref name="limits"/>, optionally preserving 4-component (CMYK/YCCK) images as a
+    /// 4-component CMYK raster (see <see cref="Decode(byte[], bool)"/>).
+    /// </summary>
+    /// <param name="data">The raw JPEG bytes (a <c>/DCTDecode</c> image stream).</param>
+    /// <param name="limits">
+    /// The limits to apply: the image may have at most <see cref="PdfLimits.MaxImagePixels"/> pixels, and its
+    /// decode may use at most 4 bytes of working memory per pixel of that limit.
+    /// </param>
+    /// <param name="preserveCmyk">When true, 4-component JPEGs are returned as 4-component CMYK.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> or <paramref name="limits"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The JPEG is malformed; or it exceeds a limit, in which case the inner exception is a
+    /// <see cref="PdfLimitExceededException"/> naming the limit.
+    /// </exception>
+    /// <exception cref="NotSupportedException">The JPEG uses an unsupported process or component count.</exception>
+    public static RasterImage Decode(byte[] data, PdfLimits limits, bool preserveCmyk = false)
     {
         if (data is null)
         {
             throw new ArgumentNullException(nameof(data));
         }
 
+        if (limits is null)
+        {
+            throw new ArgumentNullException(nameof(limits));
+        }
+
         return DecoderBoundary.Run(
             () =>
             {
-                PlaneSet planes = DecodeToPlanes(data);
+                PlaneSet planes = DecodeToPlanes(data, limits);
                 return Combine(planes.Meta, planes.Planes, planes.PlaneW, planes.HMax, planes.VMax, preserveCmyk);
             },
             "JPEG");
     }
 
-    internal static PlaneSet DecodeToPlanes(byte[] data)
+    internal static PlaneSet DecodeToPlanes(byte[] data, PdfLimits? limits = null)
     {
+        limits ??= PdfLimits.Default;
         if (data is null)
         {
             throw new ArgumentNullException(nameof(data));
@@ -94,7 +106,7 @@ public static partial class JpegDecoder
             throw new NotSupportedException("Only 1-, 3-, or 4-component JPEG is supported.");
         }
 
-        CheckBudget(meta);
+        CheckBudget(meta, limits);
         if (meta.Mode == JpegMode.Progressive)
         {
             return DecodeProgressive(data, meta);
@@ -113,12 +125,12 @@ public static partial class JpegDecoder
     // Rejects frames whose decode would exceed the pixel limit or the per-decode memory target, before
     // allocating: padded component planes (1 byte per sample, plus a 4-byte coefficient per sample for
     // progressive) and the combined output (1, 3 or 4 bytes per pixel).
-    private static void CheckBudget(JpegMetadata meta)
+    private static void CheckBudget(JpegMetadata meta, PdfLimits limits)
     {
         long pixels = (long)meta.Width * meta.Height;
-        if (pixels > Limits.MaxImagePixels)
+        if (pixels > limits.MaxImagePixels)
         {
-            throw new InvalidDataException($"JPEG of {meta.Width}x{meta.Height} exceeds the {Limits.MaxImagePixels} pixel limit.");
+            throw DecoderBoundary.PixelLimit("JPEG", meta.Width, meta.Height, limits);
         }
 
         int hMax = 1, vMax = 1;
@@ -138,9 +150,9 @@ public static partial class JpegDecoder
 
         long perSample = meta.Mode == JpegMode.Progressive ? 1 + sizeof(int) : 1;
         long outBytes = pixels * (meta.ComponentCount == 1 ? 1 : meta.ComponentCount == 4 ? 4 : 3);
-        if ((planeSamples * perSample) + outBytes > Limits.MaxDecodeWorkingSetBytes)
+        if ((planeSamples * perSample) + outBytes > DecoderBoundary.WorkingSetBytes(limits))
         {
-            throw new InvalidDataException($"JPEG of {meta.Width}x{meta.Height} exceeds the decode memory budget.");
+            throw DecoderBoundary.WorkingSetLimit($"JPEG of {meta.Width}x{meta.Height}", limits);
         }
     }
 

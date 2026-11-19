@@ -152,6 +152,13 @@ public static class DocumentJson
             w.Property("fontDistinctCount").Value(signals.FontDistinctCount);
             w.Property("textDecodeConfidence").Value(signals.TextDecodeConfidence);
             w.EndObject();
+            w.Property("incomplete").Value(page.Incomplete);
+            w.Property("incompleteReasons").BeginArray();
+            foreach (string reason in page.IncompleteReasons)
+            {
+                w.Value(reason);
+            }
+            w.EndArray();
             w.EndObject();
         }
         w.EndArray();

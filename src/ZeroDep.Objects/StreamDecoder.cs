@@ -12,8 +12,13 @@ namespace ZeroDep.Objects;
 /// </summary>
 internal static class StreamDecoder
 {
-    /// <summary>Decodes a structural stream by applying its <c>/Filter</c> chain.</summary>
-    public static byte[] Decode(PdfStream stream)
+    /// <summary>Decodes a stream by applying its <c>/Filter</c> chain, within the default limits.</summary>
+    public static byte[] Decode(PdfStream stream) => Decode(stream, PdfLimits.Default);
+
+    /// <summary>Decodes a stream by applying its <c>/Filter</c> chain, within <paramref name="limits"/>.</summary>
+    /// <exception cref="PdfLimitExceededException">The decoded output exceeds <see cref="PdfLimits.MaxDecodedStreamBytes"/>.</exception>
+    /// <exception cref="PdfSyntaxException">The stream cannot be decoded.</exception>
+    public static byte[] Decode(PdfStream stream, PdfLimits limits)
     {
         byte[] data = stream.GetRawBytes();
         PdfDictionary dict = stream.Dictionary;
@@ -28,7 +33,7 @@ internal static class StreamDecoder
         {
             for (int i = 0; i < filters.Count; i++)
             {
-                data = ApplyOne(filters[i], parms[i], data);
+                data = ApplyOne(filters[i], parms[i], data, limits);
             }
             return data;
         }
@@ -36,7 +41,13 @@ internal static class StreamDecoder
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ResourceBudget.AsLimitExceeded(ex) is { } limit)
+        {
+            // A public decoder reports a breach as InvalidDataException wrapping the PdfLimitExceededException;
+            // the document pipeline reports it under its own type again, naming the same limit.
+            throw new PdfLimitExceededException(limit.LimitName, limit.Limit, limit.Message, ex);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             // A stream that won't decode (corrupt, or still-encrypted after failed auth) is a
             // structural failure, surfaced as the handled exception type rather than a raw crash.
@@ -44,7 +55,7 @@ internal static class StreamDecoder
         }
     }
 
-    private static byte[] ApplyOne(string filter, PdfObject? parm, byte[] data)
+    private static byte[] ApplyOne(string filter, PdfObject? parm, byte[] data, PdfLimits limits)
     {
         switch (filter)
         {
@@ -56,7 +67,7 @@ internal static class StreamDecoder
                 int colors = GetInt(p, "Colors", 1);
                 int bitsPerComponent = GetInt(p, "BitsPerComponent", 8);
                 int columns = GetInt(p, "Columns", 1);
-                return FlateDecode.Decode(data, predictor, colors, bitsPerComponent, columns);
+                return FlateDecode.Decode(data, limits, predictor, colors, bitsPerComponent, columns);
             }
             case "LZWDecode":
             case "LZW":
@@ -67,17 +78,17 @@ internal static class StreamDecoder
                 int bitsPerComponent = GetInt(p, "BitsPerComponent", 8);
                 int columns = GetInt(p, "Columns", 1);
                 int earlyChange = GetInt(p, "EarlyChange", 1);
-                return LzwDecode.Decode(data, predictor, colors, bitsPerComponent, columns, earlyChange);
+                return LzwDecode.Decode(data, limits, predictor, colors, bitsPerComponent, columns, earlyChange);
             }
             case "ASCII85Decode":
             case "A85":
-                return Ascii85Decode.Decode(data);
+                return Ascii85Decode.Decode(data, limits);
             case "ASCIIHexDecode":
             case "AHx":
-                return AsciiHexDecode.Decode(data);
+                return AsciiHexDecode.Decode(data, limits);
             case "RunLengthDecode":
             case "RL":
-                return RunLengthDecode.Decode(data);
+                return RunLengthDecode.Decode(data, limits);
             default:
                 throw new PdfSyntaxException($"Unsupported filter '{filter}' on a structural stream.");
         }

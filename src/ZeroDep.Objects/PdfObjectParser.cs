@@ -97,7 +97,8 @@ internal sealed class PdfObjectParser
     {
         if (depth > Limits.MaxNestingDepth)
         {
-            throw new PdfSyntaxException($"Object nesting exceeds the limit of {Limits.MaxNestingDepth} levels.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxNestingDepth), Limits.MaxNestingDepth, $"Object nesting exceeds the limit of {Limits.MaxNestingDepth} levels.");
         }
     }
 
