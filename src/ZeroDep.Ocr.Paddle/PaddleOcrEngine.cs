@@ -341,8 +341,10 @@ public sealed class PaddleOcrEngine : IOcrEngine, IDisposable
             throw new TimeoutException();
         }
 
+        // Wait on the handle rather than Task.Wait: a read that faults because Dispose killed the worker
+        // must surface below as its own exception, not wrapped in an AggregateException.
         Task<string?> read = worker.StandardOutput.ReadLineAsync();
-        if (!read.Wait(remaining))
+        if (!((IAsyncResult)read).AsyncWaitHandle.WaitOne(remaining))
         {
             // Observe the abandoned read's eventual fault so it is not reported as unobserved.
             read.ContinueWith(t => _ = t.Exception, TaskScheduler.Default);
@@ -352,11 +354,15 @@ public sealed class PaddleOcrEngine : IOcrEngine, IDisposable
         return read.GetAwaiter().GetResult();
     }
 
-    // Removes the worker if it is still the current one, then kills and disposes it.
+    // Removes the worker if it is still the current one, then kills and disposes it. Whoever removes the
+    // worker from _worker owns its termination: when Dispose got there first it has already killed and
+    // disposed the process, and a second Kill on a disposed Process would throw.
     private void Retire(Process worker)
     {
-        Interlocked.CompareExchange(ref _worker, null, worker);
-        Terminate(worker);
+        if (ReferenceEquals(Interlocked.CompareExchange(ref _worker, null, worker), worker))
+        {
+            Terminate(worker);
+        }
     }
 
     // Kills the worker's whole process tree (Python may start helpers), reaps it, and disposes it. Safe to
@@ -371,6 +377,10 @@ public sealed class PaddleOcrEngine : IOcrEngine, IDisposable
         catch (InvalidOperationException)
         {
             // Already exited (or disposed).
+        }
+        catch (AggregateException)
+        {
+            // Part of the process tree had already exited while it was being stopped.
         }
         catch (System.ComponentModel.Win32Exception)
         {
