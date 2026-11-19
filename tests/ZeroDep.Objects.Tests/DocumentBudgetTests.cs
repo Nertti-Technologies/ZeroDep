@@ -28,7 +28,7 @@ public sealed class DocumentBudgetTests
     [Fact]
     public void Open_UsesTheGivenLimitsAndOwnsANewBudget()
     {
-        var limits = new PdfLimits { MaxWorkPerDocument = 1_000 };
+        var limits = new PdfLimits { MaxWorkPerDocument = 1_000, WorkPerSourceByte = 0 };
 
         using PdfFile file = PdfFile.Open(new MemoryStream(OnePage()), null, limits);
         using PdfFile other = PdfFile.Open(new MemoryStream(OnePage()), null, limits);
@@ -39,9 +39,41 @@ public sealed class DocumentBudgetTests
     }
 
     [Fact]
+    public void Open_SizesTheBudgetFromTheSourceLength()
+    {
+        byte[] pdf = OnePage();
+        var limits = new PdfLimits { MaxWorkPerDocument = 1_000, WorkPerSourceByte = 3 };
+
+        using PdfFile file = PdfFile.Open(new MemoryStream(pdf), null, limits);
+
+        Assert.Equal(pdf.Length, file.Budget.SourceLength);
+        Assert.Equal(1_000 + (3L * pdf.Length), file.Budget.MaxWork);
+    }
+
+    [Fact]
+    public void Charge_OverTheAllowance_NamesHowTheBudgetWasDerived()
+    {
+        var budget = new ResourceBudget(new PdfLimits { MaxWorkPerDocument = 10, WorkPerSourceByte = 2 }, 5);
+
+        var ex = Assert.Throws<PdfLimitExceededException>(() => budget.Charge(21));
+
+        Assert.Equal(nameof(PdfLimits.MaxWorkPerDocument), ex.LimitName);
+        Assert.Equal(20, ex.Limit);
+        Assert.Equal("Document exceeds the work limit of 20 (10 base + 2 per byte for 5 bytes).", ex.Message);
+    }
+
+    [Fact]
+    public void Charge_WithoutAnAllowance_KeepsThePlainMessage()
+    {
+        var budget = new ResourceBudget(new PdfLimits { MaxWorkPerDocument = 10 });
+
+        Assert.Equal("Document exceeds the work limit of 10.", Assert.Throws<PdfLimitExceededException>(() => budget.Charge(11)).Message);
+    }
+
+    [Fact]
     public void ObjectReads_ChargeTheDocumentBudget()
     {
-        using PdfFile file = PdfFile.Open(new MemoryStream(OnePage()), null, new PdfLimits { MaxWorkPerDocument = 1_000 });
+        using PdfFile file = PdfFile.Open(new MemoryStream(OnePage()), null, new PdfLimits { MaxWorkPerDocument = 1_000, WorkPerSourceByte = 0 });
 
         Assert.Equal(0, file.Budget.Work);
         file.GetObject(1);
@@ -55,7 +87,7 @@ public sealed class DocumentBudgetTests
     [Fact]
     public void ObjectReads_OverTheDocumentBudget_AreRejected()
     {
-        using PdfFile file = PdfFile.Open(new MemoryStream(OnePage()), null, new PdfLimits { MaxWorkPerDocument = 1 });
+        using PdfFile file = PdfFile.Open(new MemoryStream(OnePage()), null, new PdfLimits { MaxWorkPerDocument = 1, WorkPerSourceByte = 0 });
 
         file.GetObject(1);
         var ex = Assert.Throws<PdfLimitExceededException>(() => file.GetObject(2));
@@ -100,7 +132,7 @@ public sealed class DocumentBudgetTests
         body.Write(A($"trailer\n<< /Size {offsets.Count + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"));
         byte[] pdf = body.ToArray();
 
-        var limits = new PdfLimits { MaxWorkPerDocument = 20_000 };
+        var limits = new PdfLimits { MaxWorkPerDocument = 20_000, WorkPerSourceByte = 0 };
         Exception? ex = Bounded.Run(() =>
         {
             using PdfFile file = PdfFile.Open(new MemoryStream(pdf), null, limits);

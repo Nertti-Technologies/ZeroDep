@@ -83,8 +83,8 @@ internal sealed class PdfFile : IDisposable
     public static PdfFile Open(Stream stream, string? password, PdfLimits limits)
     {
         if (limits is null) throw new ArgumentNullException(nameof(limits));
-        var budget = new ResourceBudget(limits);
         var source = PdfByteSource.Create(stream);
+        var budget = new ResourceBudget(limits, source.Length);
         try
         {
             var file = new PdfFile(source, budget);

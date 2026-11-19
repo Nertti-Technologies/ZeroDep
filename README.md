@@ -258,6 +258,7 @@ var options = new AnalyzerOptions
     {
         MaxDecodedStreamBytes = 64L * 1024 * 1024,  // 64 MiB per decoded stream
         MaxWorkPerDocument = 100_000_000,
+        WorkPerSourceByte = 0,                     // the same work budget whatever the file size
     },
 };
 
@@ -277,13 +278,15 @@ decoders and `ColorConverter.ToRgb` have overloads that take a `PdfLimits`. The 
 | `MaxDecodedStreamBytes` | 256 MiB | Output of one decoded stream; also the largest object read from the file |
 | `MaxImagePixels` | 2<sup>28</sup> (268,435,456) | Pixels in one image; a decoder's working set is 4 bytes per allowed pixel |
 | `MaxWorkPerPage` | 50,000,000 | Content operators and glyphs interpreted for one page, including Form XObjects |
-| `MaxWorkPerDocument` | 250,000,000 | All content work plus object reads (one unit per 64 bytes) across the document |
+| `MaxWorkPerDocument` | 250,000,000 | Base budget for all content work plus object reads (one unit per 64 bytes) across the document |
+| `WorkPerSourceByte` | 256 | Work added to the document budget per byte of the file, so large scanned books fit while small files stay bounded by the base |
 | `MaxFormFields` | 100,000 | Interactive form fields |
 | `MaxCMapEntries` | 1,048,576 | Entries in one font character map or width table |
 
 The defaults are **estimates**: sized to stay well above what ordinary documents need while keeping one
-analysis within a few gigabytes of memory, not measured against a corpus. Each value must be greater than
-zero; a value of zero or less throws `ArgumentOutOfRangeException`.
+analysis within a few gigabytes of memory. Only the document work budget has been checked against real
+books so far. Each value must be greater than zero, except `WorkPerSourceByte`, which may be zero to turn
+the allowance off; a value out of range throws `ArgumentOutOfRangeException`.
 
 What happens when a limit is exceeded:
 

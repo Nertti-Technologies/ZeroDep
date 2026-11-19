@@ -29,7 +29,7 @@ public sealed class PdfAnalyzerLimitsTests
         // Three pages of 1,000 operators each: every page fits the page budget, but the analysis passes over
         // all of them exceed the document budget.
         byte[] pdf = Pages(Ops(1_000), Ops(1_000), Ops(1_000));
-        var limits = new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 4_000 };
+        var limits = new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 4_000, WorkPerSourceByte = 0 };
 
         DocumentAnalysis analysis = PdfAnalyzer.Analyze(S(pdf), With(limits));
 
@@ -40,10 +40,23 @@ public sealed class PdfAnalyzerLimitsTests
     }
 
     [Fact]
+    public void Analyze_ContentHeavyFile_IsAdmittedByThePerByteAllowance()
+    {
+        // The ADR-0011 case in miniature: content-heavy pages need more than the base budget, and the
+        // allowance for the file's own size covers them.
+        byte[] pdf = Pages(Ops(1_000), Ops(1_000), Ops(1_000));
+        var noAllowance = new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 4_000, WorkPerSourceByte = 0 };
+        var allowance = new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 4_000, WorkPerSourceByte = 16 };
+
+        Assert.Equal(DocumentStatus.Rejected, PdfAnalyzer.Analyze(S(pdf), With(noAllowance)).Status);
+        Assert.Equal(DocumentStatus.Processed, PdfAnalyzer.Analyze(S(pdf), With(allowance)).Status);
+    }
+
+    [Fact]
     public void Extraction_DocumentOverItsWorkBudget_ThrowsLimitExceeded()
     {
         byte[] pdf = Pages(Ops(10));
-        AnalyzerOptions options = With(new PdfLimits { MaxWorkPerDocument = 1 });
+        AnalyzerOptions options = With(new PdfLimits { MaxWorkPerDocument = 1, WorkPerSourceByte = 0 });
 
         foreach (Action<Stream, AnalyzerOptions> extract in Extractors())
         {
@@ -57,7 +70,7 @@ public sealed class PdfAnalyzerLimitsTests
     public void Extraction_DocumentWorkAcrossPages_IsBounded()
     {
         byte[] pdf = Pages(Ops(1_000), Ops(1_000), Ops(1_000));
-        AnalyzerOptions options = With(new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 2_500 });
+        AnalyzerOptions options = With(new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 2_500, WorkPerSourceByte = 0 });
 
         var ex = Assert.Throws<PdfLimitExceededException>(() => PdfAnalyzer.ExtractText(S(pdf), options));
         Assert.Equal(nameof(PdfLimits.MaxWorkPerDocument), ex.LimitName);
@@ -223,7 +236,7 @@ public sealed class PdfAnalyzerLimitsTests
     public void ToJson_SerializesTheNewReasonAndTheIncompleteSignal()
     {
         byte[] heavy = Pages(Ops(1_000), Ops(1_000), Ops(1_000));
-        string rejected = PdfAnalyzer.ToJson(S(heavy), With(new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 4_000 }));
+        string rejected = PdfAnalyzer.ToJson(S(heavy), With(new PdfLimits { MaxWorkPerPage = 2_000, MaxWorkPerDocument = 4_000, WorkPerSourceByte = 0 }));
         Assert.Contains("\"schemaVersion\":\"1.3\"", rejected, StringComparison.Ordinal);
         Assert.Contains("\"reason\":\"ResourceLimitExceeded\"", rejected, StringComparison.Ordinal);
 

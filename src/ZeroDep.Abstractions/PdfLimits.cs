@@ -27,6 +27,7 @@ public sealed class PdfLimits
     private const long DefaultMaxWorkPerDocument = 250_000_000;
     private const int DefaultMaxFormFields = 100_000;
     private const int DefaultMaxCMapEntries = 1_048_576;
+    private const long DefaultWorkPerSourceByte = 256;
 
     private readonly long _maxDecodedStreamBytes = DefaultMaxDecodedStreamBytes;
     private readonly long _maxImagePixels = DefaultMaxImagePixels;
@@ -34,6 +35,7 @@ public sealed class PdfLimits
     private readonly long _maxWorkPerDocument = DefaultMaxWorkPerDocument;
     private readonly int _maxFormFields = DefaultMaxFormFields;
     private readonly int _maxCMapEntries = DefaultMaxCMapEntries;
+    private readonly long _workPerSourceByte = DefaultWorkPerSourceByte;
 
     /// <summary>The default budgets. Every value is an estimate; see each property.</summary>
     public static PdfLimits Default { get; } = new PdfLimits();
@@ -77,10 +79,11 @@ public sealed class PdfLimits
     }
 
     /// <summary>
-    /// Work units the whole document may use: the content work of every page in every analysis pass, plus one
-    /// unit per 64 bytes read while loading indirect objects. Default 250,000,000. <b>Estimate</b>: five pages
-    /// at the page budget; a 1,000-page text document at about 10^5 units per page uses 10^8 units per pass. A
-    /// document over the budget is rejected with <see cref="RejectionReason.ResourceLimitExceeded"/>.
+    /// The base number of work units the whole document may use: the content work of every page in every
+    /// analysis pass, plus one unit per 64 bytes read while loading indirect objects. The document's budget is
+    /// this base plus <see cref="WorkPerSourceByte"/> for each byte of the file. Default 250,000,000.
+    /// <b>Estimate</b>: about 10 s of CPU at the measured 31–40 ns per unit, the most a small file can use. A
+    /// document over its budget is rejected with <see cref="RejectionReason.ResourceLimitExceeded"/>.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is zero or negative.</exception>
     public long MaxWorkPerDocument
@@ -110,6 +113,42 @@ public sealed class PdfLimits
     {
         get => _maxCMapEntries;
         init => _maxCMapEntries = (int)Positive(value, nameof(MaxCMapEntries));
+    }
+
+    /// <summary>
+    /// Work units added to the document budget for each byte of the file, so a larger file may do more work
+    /// while a small file stays bounded by <see cref="MaxWorkPerDocument"/>. Default 256; zero turns the
+    /// allowance off. <b>Estimate</b>: a 435-page scanned book with a text layer measured about 138 units per
+    /// byte, and a born-digital 800-page book under 16, so the default gives the scanned book about 1.85×
+    /// headroom.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public long WorkPerSourceByte
+    {
+        get => _workPerSourceByte;
+        init => _workPerSourceByte = value >= 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(WorkPerSourceByte), value, "The work allowance per byte cannot be negative.");
+    }
+
+    /// <summary>
+    /// The document work budget for a file of <paramref name="sourceLength"/> bytes:
+    /// <see cref="MaxWorkPerDocument"/> plus <see cref="WorkPerSourceByte"/> per byte, saturating at
+    /// <see cref="long.MaxValue"/>.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="sourceLength"/> is negative.</exception>
+    public long DocumentWorkBudget(long sourceLength)
+    {
+        if (sourceLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(sourceLength), sourceLength, "A source length cannot be negative.");
+        }
+
+        if (_workPerSourceByte == 0 || sourceLength == 0) return _maxWorkPerDocument;
+        long headroom = long.MaxValue - _maxWorkPerDocument;
+        return sourceLength > headroom / _workPerSourceByte
+            ? long.MaxValue
+            : _maxWorkPerDocument + (_workPerSourceByte * sourceLength);
     }
 
     private static long Positive(long value, string name)

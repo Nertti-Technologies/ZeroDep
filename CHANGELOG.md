@@ -19,6 +19,10 @@ All notable changes to **ZeroDep** are documented here. The format follows
   `AnalyzerOptions.Limits`. Every `PdfAnalyzer` method gains an `(Stream, AnalyzerOptions)` overload, the
   public stream and image decoders and `ColorConverter.ToRgb` gain a `PdfLimits` overload, and the existing
   overloads keep their behaviour.
+- **`PdfLimits.WorkPerSourceByte`** (default 256) and `PdfLimits.DocumentWorkBudget(long)`. The document work
+  budget is now `MaxWorkPerDocument` plus this allowance for each byte of the file, so large scanned books
+  with a text layer are processed instead of rejected, while a small file is still bounded by the base
+  budget. Set it to 0 for a fixed budget. A rejection message shows how the budget was derived.
 - **`PdfLimitExceededException`**, derived from `PdfSyntaxException`, with `LimitName` and `Limit`. Public
   decoders still throw `InvalidDataException` and carry it as the inner exception.
 - **`RejectionReason.ResourceLimitExceeded`** for documents rejected because a limit was hit.
