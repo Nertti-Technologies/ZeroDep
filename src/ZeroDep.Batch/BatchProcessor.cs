@@ -21,6 +21,8 @@ public sealed class BatchProcessor
 {
     private const string LedgerFileName = "ledger.tsv";
     private const string AggregateFileName = "aggregate.json";
+    // Hidden coupling: the release smoke gate (tools/ZeroDep.Smoke/Program.cs) counts the files in this folder
+    // to check the batch run. Rename it in both places.
     private const string PerFileDirectoryName = "perfile";
 
     private readonly object _ledgerLock = new object();

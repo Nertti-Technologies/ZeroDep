@@ -27,6 +27,9 @@
     <Project Path="src/ZeroDep.Ocr.Tesseract/ZeroDep.Ocr.Tesseract.csproj" />
     <Project Path="src/ZeroDep.Ocr.Paddle/ZeroDep.Ocr.Paddle.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/ZeroDep.Smoke/ZeroDep.Smoke.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ZeroDep.Tests/ZeroDep.Tests.csproj" />
     <Project Path="tests/ZeroDep.Abstractions.Tests/ZeroDep.Abstractions.Tests.csproj" />
@@ -48,5 +51,6 @@
     <Project Path="tests/ZeroDep.Ocr.Tesseract.Tests/ZeroDep.Ocr.Tesseract.Tests.csproj" />
     <Project Path="tests/ZeroDep.Ocr.Paddle.Tests/ZeroDep.Ocr.Paddle.Tests.csproj" />
     <Project Path="tests/ZeroDep.Cli.Tests/ZeroDep.Cli.Tests.csproj" />
+    <Project Path="tests/ZeroDep.Smoke.Tests/ZeroDep.Smoke.Tests.csproj" />
   </Folder>
 </Solution>

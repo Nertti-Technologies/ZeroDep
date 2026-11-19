@@ -424,6 +424,15 @@ package.
 Issues and pull requests are welcome. Please run `dotnet test ZeroDep.slnx -c Release` before
 submitting; all targets must build clean (warnings are treated as errors).
 
+Releases also pass a smoke gate over real documents. `tools/ZeroDep.Smoke` runs the built CLI (text, JSON and
+batch modes) over a random sample of a local PDF folder, one document at a time with a timeout and a memory
+ceiling. With `--attest` it writes `build/smoke-attestation.json`, which holds file hashes and counts only. The
+release workflow refuses to publish unless that file matches the source being released:
+
+```
+dotnet run --project tools/ZeroDep.Smoke -c Release -- <pdfFolder> [--sample=N | --all] [--seed=S] --attest
+```
+
 ## License
 
 Licensed under the [Apache License 2.0](https://github.com/Nerttiyana-Technologies/ZeroDep/blob/main/LICENSE).
