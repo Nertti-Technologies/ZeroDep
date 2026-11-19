@@ -4,7 +4,7 @@
 
 A 100% dependency-free .NET engine for PDF structural analysis.
 
-![Target frameworks](https://img.shields.io/badge/.NET-netstandard2.0%20%7C%20net8.0%20%7C%20net10.0-512BD4)
+![Target frameworks](https://img.shields.io/badge/.NET-netstandard2.0%20%7C%20net10.0%20%7C%20net11.0-512BD4)
 ![Zero dependencies](https://img.shields.io/badge/dependencies-0-1ED760)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![ISO 32000-2](https://img.shields.io/badge/PDF-ISO%2032000--2-22D3EE)
@@ -27,7 +27,7 @@ zero-dependency promise while still answering the questions that matter for docu
 - **Zero supply-chain surface.** One managed assembly. No native assets, no RID-specific builds, no
   third-party CVEs to track. Trivial to vendor, audit, and deploy.
 - **Broad reach.** Multi-targets `netstandard2.0` (so it runs on .NET Framework 4.6.1+) alongside
-  modern `net8.0` and `net10.0`.
+  modern `net10.0` and `net11.0`.
 - **Deterministic and inspectable.** Pure managed code, stream-based and memory-conscious. The same
   bytes always produce the same typed result.
 - **Safe by default.** Corrupted files are *rejected* with a structured reason rather than silently
@@ -289,11 +289,11 @@ derived only from how the file is built, never from what it says.
 | Target | Use |
 |--------|-----|
 | `netstandard2.0` | .NET Framework 4.6.1+, older runtimes |
-| `net8.0` | Modern .NET (LTS) |
-| `net10.0` | Latest .NET |
+| `net10.0` | Modern .NET (LTS) |
+| `net11.0` | Latest .NET |
 
 Crypto uses the in-box `System.Security.Cryptography` (AES, MD5, SHA-2 ship with every target); RC4
-is implemented in-house. Building from source requires the .NET SDK **10.0.300+**.
+is implemented in-house. Building from source requires the .NET SDK **11.0.100+**.
 
 ## Output schema (overview)
 

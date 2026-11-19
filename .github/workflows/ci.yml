@@ -16,9 +16,9 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            10.0.300
+          # SDK from global.json; the 10.0 runtime is needed to run the net10.0 test target.
+          global-json-file: global.json
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: dotnet restore ZeroDep.slnx

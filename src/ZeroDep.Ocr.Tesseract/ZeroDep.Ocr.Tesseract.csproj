@@ -3,7 +3,7 @@
     <RootNamespace>ZeroDep.Ocr.Tesseract</RootNamespace>
     <AssemblyName>ZeroDep.Ocr.Tesseract</AssemblyName>
     <!-- OCR engines are modern-only; drop netstandard2.0 for this adapter. -->
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <Description>Tesseract IOcrEngine adapter for ZeroDep.Ocr — drives the tesseract command-line program to recover text from scanned images. No managed or native package dependency; requires the tesseract executable on PATH.</Description>
     <PackageTags>pdf;ocr;tesseract;zerodep</PackageTags>
   </PropertyGroup>

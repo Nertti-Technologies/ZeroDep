@@ -2,7 +2,7 @@
 
   <!-- Shared build settings for every ZeroDep project. -->
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.0;net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;net10.0;net11.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -32,7 +32,7 @@
     <PackageTags>pdf;analysis;dpi;ocr;acroform;zero-dependency;netstandard</PackageTags>
     <Description>A 100% dependency-free .NET engine for PDF structural analysis: DPI metrics, text and OCR-layer extraction, AcroForm mapping, standard-handler decryption, and typed JSON output.</Description>
     <PackageReleaseNotes>See CHANGELOG.md for release notes.</PackageReleaseNotes>
-    <Version>2.1.1</Version>
+    <Version>2.2.0</Version>
   </PropertyGroup>
 
   <!-- Embed the README in every package. -->

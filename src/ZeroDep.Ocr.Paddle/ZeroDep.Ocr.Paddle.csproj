@@ -3,7 +3,7 @@
     <RootNamespace>ZeroDep.Ocr.Paddle</RootNamespace>
     <AssemblyName>ZeroDep.Ocr.Paddle</AssemblyName>
     <!-- OCR engines are modern-only; drop netstandard2.0 for this adapter. -->
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <Description>PaddleOCR IOcrEngine adapter for ZeroDep.Ocr — drives the PaddleOCR Python package via a bundled script to recover text from scanned images, with strong CJK support. No managed or native package dependency; requires Python with the paddleocr package installed.</Description>
     <PackageTags>pdf;ocr;paddleocr;cjk;zerodep</PackageTags>
   </PropertyGroup>
