@@ -57,9 +57,10 @@ jobs:
             echo "::warning::README roadmap row for ${VERSION} is not marked 'Released': ${roadmap}"
           fi
 
-      # Release gate: the real-document smoke run must have passed for exactly this source tree. The run needs
+      # Release gate: the real-document smoke run must have passed for exactly these build inputs. The run needs
       # the owner's private corpus, so it happens locally (tools/ZeroDep.Smoke --attest) and its hash-only
-      # attestation is committed. Any change under src/ after that run changes the tree hash and fails here.
+      # attestation is committed. Any later change to a build input changes the hash and fails here.
+      # Hidden coupling: the path list below must match Git.BuildInputs in tools/ZeroDep.Smoke/Git.cs, in order.
       - name: Verify the smoke attestation matches this release
         run: |
           set -euo pipefail
@@ -68,9 +69,9 @@ jobs:
             echo "::error::$f is missing. Run 'dotnet run --project tools/ZeroDep.Smoke -c Release -- <corpus> --attest' and commit it."
             exit 1
           fi
-          tree="$(git rev-parse HEAD:src)"
-          if ! jq -e --arg t "$tree" '.schemaVersion == 1 and .srcTree == $t' "$f" > /dev/null; then
-            echo "::error::$f was made for src tree $(jq -r .srcTree "$f"), but this release is $tree. Re-run the smoke gate."
+          inputs="$(git ls-tree -r HEAD -- src Directory.Build.props global.json build/IsExternalInit.cs build/OverloadResolutionPriorityAttribute.cs | sha256sum | cut -d' ' -f1)"
+          if ! jq -e --arg h "$inputs" '.schemaVersion == 2 and .buildInputs == $h' "$f" > /dev/null; then
+            echo "::error::$f was made for build inputs $(jq -r .buildInputs "$f"), but this release is $inputs. Re-run the smoke gate."
             exit 1
           fi
           if ! jq -e '.failed == 0 and (.rejected == 0 or .rejectionsAccepted == true)' "$f" > /dev/null; then

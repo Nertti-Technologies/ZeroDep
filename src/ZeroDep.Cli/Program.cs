@@ -51,6 +51,9 @@ try
 catch (PdfSyntaxException ex)
 {
     // The --json path reports the same failure as a Rejected status; here it ends the report with exit 3.
+    // Hidden coupling: the release smoke gate (tools/ZeroDep.Smoke/DocumentChecks.cs) treats exit 3 as "rejected",
+    // any other non-zero exit or an "Unhandled exception" on stderr as a crash, and reads the JSON fields
+    // status, pageCount and rejection.reason/detail. Change both together.
     Console.Error.WriteLine(ConsoleText.RejectionLine(ex));
     return 3;
 }

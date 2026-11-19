@@ -7,6 +7,10 @@ namespace ZeroDep.Cli;
 /// Formats PDF-derived values for the terminal. Every string taken from a document passes through
 /// <see cref="Clean"/>, so a crafted name or value cannot send terminal escape sequences.
 /// </summary>
+/// <remarks>
+/// The release smoke gate repeats the <see cref="Clean"/> rule in tools/ZeroDep.Smoke/TerminalText.cs (it runs this
+/// CLI as a process and cannot reference it); keep the two alike.
+/// </remarks>
 internal static class ConsoleText
 {
     /// <summary>

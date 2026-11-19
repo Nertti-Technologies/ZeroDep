@@ -23,20 +23,31 @@ internal static class CorpusScanner
 
     private const int MaxLinkHops = 32;
 
+    private const string DataVolume = "/System/Volumes/Data";
+
     /// <summary>Whether the real path <paramref name="path"/> is inside a forbidden root.</summary>
     public static bool IsForbidden(string path, string home) => IsForbidden(path, home, ForbiddenRoots);
 
     /// <summary>Whether <paramref name="path"/> is inside one of <paramref name="roots"/>.</summary>
     public static bool IsForbidden(string path, string home, IReadOnlyList<string> roots)
     {
+        string canonical = WithoutDataVolume(path);
         foreach (string root in roots)
         {
             string full = root.StartsWith("~/", StringComparison.Ordinal) ? Path.Combine(home, root.Substring(2)) : root;
-            if (IsSameOrUnder(path, full)) return true;
+            if (IsSameOrUnder(canonical, WithoutDataVolume(full))) return true;
         }
 
         return false;
     }
+
+    /// <summary>
+    /// On macOS the system volume firmlinks <c>/Volumes</c>, <c>/Users</c> and others to the data volume, so
+    /// <c>/System/Volumes/Data/Volumes/NAS</c> is the same place as <c>/Volumes/NAS</c>. A firmlink is not a
+    /// symbolic link and is not resolved by <see cref="RealPath(string, string)"/>, so the prefix is removed here.
+    /// </summary>
+    private static string WithoutDataVolume(string path)
+        => path.StartsWith(DataVolume + "/", StringComparison.OrdinalIgnoreCase) ? path.Substring(DataVolume.Length) : path;
 
     /// <summary>
     /// Every <c>*.pdf</c> under <paramref name="corpus"/>, as real paths sorted ordinally (so a seeded sample is

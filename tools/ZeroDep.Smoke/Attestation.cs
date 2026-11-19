@@ -8,18 +8,19 @@ namespace ZeroDep.Smoke;
 /// </summary>
 internal static class Attestation
 {
-    public const int SchemaVersion = 1;
+    /// <summary>2: <c>buildInputs</c> (a hash of every committed build input) replaced <c>srcTree</c>.</summary>
+    public const int SchemaVersion = 2;
 
     public const string RelativePath = "build/smoke-attestation.json";
 
-    public static string Write(string srcTree, int seed, IReadOnlyList<DocumentVerdict> verdicts, bool rejectionsAccepted, DateTimeOffset now)
+    public static string Write(string buildInputs, int seed, IReadOnlyList<DocumentVerdict> verdicts, bool rejectionsAccepted, DateTimeOffset now)
     {
         var buffer = new MemoryStream();
         using (var w = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
         {
             w.WriteStartObject();
             w.WriteNumber("schemaVersion", SchemaVersion);
-            w.WriteString("srcTree", srcTree);
+            w.WriteString("buildInputs", buildInputs);
             w.WriteString("createdUtc", now.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture));
             w.WriteNumber("seed", seed);
             w.WriteNumber("sample", verdicts.Count);

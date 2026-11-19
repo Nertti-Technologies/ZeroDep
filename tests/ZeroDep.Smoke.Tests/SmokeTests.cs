@@ -24,13 +24,13 @@ public sealed class SmokeOptionsTests
     [Fact]
     public void Flags_AreRead()
     {
-        SmokeOptions o = SmokeOptions.Parse(["c", "--sample=2", "--seed=42", "--timeout=30", "--max-memory-mb=512", "--no-build", "--attest", "--accept-rejections"], 0, out _)!;
+        SmokeOptions o = SmokeOptions.Parse(["c", "--sample=2", "--seed=42", "--timeout=30", "--max-memory-mb=512", "--attest", "--accept-rejections"], 0, out _)!;
 
         Assert.Equal(2, o.Sample);
         Assert.Equal(42, o.Seed);
         Assert.Equal(TimeSpan.FromSeconds(30), o.Timeout);
         Assert.Equal(512L * 1024 * 1024, o.MaxMemoryBytes);
-        Assert.False(o.Build);
+        Assert.True(o.Build);
         Assert.True(o.Attest);
         Assert.True(o.AcceptRejections);
     }
@@ -44,6 +44,7 @@ public sealed class SmokeOptionsTests
         new[] { "c", "--bogus" },
         new[] { "c", "d" },
         new[] { "c", "--accept-rejections" },
+        new[] { "c", "--attest", "--no-build" },
     };
 
     [Theory]
@@ -68,6 +69,9 @@ public sealed class CorpusScannerTests
     [InlineData("/Users/someone/Library/CloudStorage/OneDrive/a.pdf")]
     [InlineData("/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/a.pdf")]
     [InlineData("/volumes/nas")] // case-insensitive, as on the default macOS file system
+    [InlineData("/System/Volumes/Data/Volumes/NAS/Books")] // firmlinked aliases of the same places
+    [InlineData("/System/Volumes/Data/Users/someone/Library/CloudStorage/x")]
+    [InlineData("/System/Volumes/Data/Network/Servers/x")]
     public void ExternalAndSyncedLocations_AreForbidden(string path)
     {
         Assert.True(CorpusScanner.IsForbidden(path, Home));
@@ -78,6 +82,8 @@ public sealed class CorpusScannerTests
     [InlineData("/Users/someone/Workspace/Volumes")]
     [InlineData("/VolumesX")]
     [InlineData("/Users/someone/Library/CloudStorageX")]
+    [InlineData("/System/Volumes/Data/Users/someone/Workspace/Books")]
+    [InlineData("/System/Volumes/DataX/Volumes")]
     public void LocalLocations_AreAllowed(string path)
     {
         Assert.False(CorpusScanner.IsForbidden(path, Home));
@@ -232,14 +238,23 @@ public sealed class DocumentChecksTests
         Assert.Contains(v.Failures, f => f.Contains("exit 134", StringComparison.Ordinal));
     }
 
-    [Theory]
-    [InlineData(0, Rejected)]
-    [InlineData(3, Processed)]
-    public void TextAndJsonDisagreeing_Fails(int textExit, string json)
+    [Fact]
+    public void TextRejectingWhatJsonProcessed_Fails()
     {
-        DocumentVerdict v = DocumentChecks.Evaluate("/c/a.pdf", "ab", Run(textExit), Run(0, json));
+        DocumentVerdict v = DocumentChecks.Evaluate("/c/a.pdf", "ab", Run(3), Run(0, Processed));
 
-        Assert.Contains(v.Failures, f => f.Contains("disagrees", StringComparison.Ordinal));
+        Assert.Contains(v.Failures, f => f.Contains("text mode rejected", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void JsonRejectingWhatTextRead_Passes()
+    {
+        // JSON mode's preflight (for example a missing %%EOF) and shared work budget may reject a document that
+        // text mode recovers and reads; that is not a defect.
+        DocumentVerdict v = DocumentChecks.Evaluate("/c/a.pdf", "ab", Run(0), Run(0, Rejected));
+
+        Assert.True(v.Passed);
+        Assert.True(v.Rejected);
     }
 
     [Fact]
@@ -283,18 +298,83 @@ public sealed class AttestationTests
             new DocumentVerdict("/Users/someone/Books/Other.pdf", "aa", "Rejected", 0, "R: d", TimeSpan.Zero, 0, []),
         };
 
-        string json = Attestation.Write("tree123", 42, verdicts, rejectionsAccepted: true, new DateTimeOffset(2026, 11, 20, 1, 2, 3, TimeSpan.Zero));
+        string json = Attestation.Write("inputs123", 42, verdicts, rejectionsAccepted: true, new DateTimeOffset(2026, 11, 20, 1, 2, 3, TimeSpan.Zero));
 
         Assert.DoesNotContain("Secret", json, StringComparison.Ordinal);
         Assert.DoesNotContain("Books", json, StringComparison.Ordinal);
         using JsonDocument doc = JsonDocument.Parse(json);
         JsonElement root = doc.RootElement;
-        Assert.Equal("tree123", root.GetProperty("srcTree").GetString());
+        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal("inputs123", root.GetProperty("buildInputs").GetString());
         Assert.Equal("2026-11-20T01:02:03Z", root.GetProperty("createdUtc").GetString());
         Assert.Equal(2, root.GetProperty("sample").GetInt32());
         Assert.Equal(0, root.GetProperty("failed").GetInt32());
         Assert.Equal(1, root.GetProperty("rejected").GetInt32());
         Assert.True(root.GetProperty("rejectionsAccepted").GetBoolean());
         Assert.Equal(["aa", "bb"], root.GetProperty("documents").EnumerateArray().Select(d => d.GetProperty("sha256").GetString()));
+    }
+}
+
+public sealed class TerminalTextTests
+{
+    [Fact]
+    public void Clean_ReplacesC0DelAndC1Controls()
+    {
+        Assert.Equal("a ]b   c", TerminalText.Clean("a\u001b]b\u007f\u0085\u009bc"));
+        Assert.Equal("", TerminalText.Clean(null));
+    }
+}
+
+public sealed class ChildProcessTests
+{
+    [Fact]
+    public async Task Cancellation_KillsTheChildProcess()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => ChildProcess.RunAsync("sleep", ["30"], null, TimeSpan.FromMinutes(1), long.MaxValue, cts.Token));
+
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), $"took {clock.Elapsed}");
+    }
+
+    [Fact]
+    public async Task Timeout_KillsAndReportsIt()
+    {
+        CliRun run = await ChildProcess.RunAsync("sleep", ["30"], null, TimeSpan.FromMilliseconds(300), long.MaxValue, CancellationToken.None);
+
+        Assert.StartsWith("timed out", run.Killed, StringComparison.Ordinal);
+    }
+}
+
+public sealed class GitTests
+{
+    [Fact]
+    public async Task BuildInputsHash_MatchesTheReleaseWorkflowPipeline()
+    {
+        // release.yml computes: git ls-tree -r HEAD -- <inputs> | sha256sum. The tool must produce the same bytes.
+        string repo = RepoRoot();
+        string paths = string.Join(' ', Git.BuildInputs);
+        CliRun shell = await ChildProcess.RunAsync(
+            "sh",
+            ["-c", $"git ls-tree -r HEAD -- {paths} | (sha256sum 2>/dev/null || shasum -a 256) | cut -d' ' -f1"],
+            repo,
+            TimeSpan.FromMinutes(1),
+            long.MaxValue,
+            CancellationToken.None);
+
+        Assert.Equal(0, shell.ExitCode);
+        Assert.Equal(shell.StdOut.Trim(), await Git.BuildInputsHashAsync(repo, CancellationToken.None));
+    }
+
+    private static string RepoRoot()
+    {
+        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "ZeroDep.slnx"))) return dir.FullName;
+        }
+
+        throw new InvalidOperationException("repository root not found");
     }
 }

@@ -63,9 +63,12 @@ internal static class DocumentChecks
             }
         }
 
-        if (status is not null && text.Killed is null && (text.ExitCode == RejectedExitCode) != (status == "Rejected"))
+        // One direction only. JSON mode runs a preflight (for example a missing %%EOF) and one work budget across
+        // all passes, so it may reject a document that text mode, which recovers and budgets each extractor
+        // separately, still reads. The reverse must hold: a document text mode cannot read, JSON must reject.
+        if (status == "Processed" && text.Killed is null && text.ExitCode == RejectedExitCode)
         {
-            failures.Add($"text exit {text.ExitCode} disagrees with JSON status {status}");
+            failures.Add($"text mode rejected the document (exit {RejectedExitCode}) but JSON processed it");
         }
 
         return new DocumentVerdict(
