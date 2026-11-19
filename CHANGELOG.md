@@ -6,6 +6,13 @@ All notable changes to **ZeroDep** are documented here. The format follows
 
 ## 2.2.0 — Unreleased
 
+### Added
+
+- **`THIRD-PARTY-NOTICES.txt`**, shipped in every package. It credits material that ZeroDep includes
+  under other licences: CMYK conversion coefficients (Apache-2.0), the JPEG 2000 bit-reader structure
+  (BSD-2-Clause) and a glyph-name list subset (BSD-3-Clause). The file is generated from `third-party/` by
+  `build/generate-notices.sh`, and CI fails when it is out of date.
+
 ### Changed
 
 - **Target frameworks are now `netstandard2.0`, `net10.0` and `net11.0`.** `net11.0` is added. `net8.0` is
@@ -14,13 +21,27 @@ All notable changes to **ZeroDep** are documented here. The format follows
   `ZeroDep.Ocr.Paddle`) now target `net10.0` and `net11.0`.
 - **Builds use the .NET SDK 11.0.100+** (`global.json`, `rollForward: latestFeature`). Tests run on both
   `net10.0` and `net11.0`.
+- Invalid predictor parameters (predictor values 3–9 or above 15, unsupported colour or bit depths) are
+  rejected instead of being treated as PNG prediction.
+- The TrueType hinting interpreter now has an instruction budget of 1,000,000 for each program (font,
+  control value and glyph); a font that exceeds it falls back to the unhinted outline.
 
-### Added
+### Fixed
 
-- **`THIRD-PARTY-NOTICES.txt`**, shipped in every package. It credits material that ZeroDep includes
-  under other licences: CMYK conversion coefficients (Apache-2.0), the JPEG 2000 bit-reader structure
-  (BSD-2-Clause) and a glyph-name list subset (BSD-3-Clause). The file is generated from `third-party/` by
-  `build/generate-notices.sh`, and CI fails when it is out of date.
+- **Bounded processing of malformed input.** Parsing, stream and image decoding, colour conversion, content
+  interpretation and font handling now enforce fixed limits on nesting depth, decoded size, pixel count and
+  work, and detect reference cycles. An input that exceeds a limit is rejected, or the affected page, image
+  or glyph is skipped, instead of exhausting the stack, memory or CPU. The limits are internal constants in
+  this release.
+- **Exception contract.** `PdfAnalyzer.Analyze` and `ToJson` report any non-fatal failure as a `Rejected`
+  result. The extraction methods throw only `PdfSyntaxException` for bad input, `PdfDocument.Open` likewise,
+  and the public stream and image decoders throw only `InvalidDataException` or `NotSupportedException`.
+- **Encryption.** AESV2 files without a top-level `/Length` derive the key length from the crypt filter, so
+  such files now open. The `Identity` crypt filter, `/StrF` and `/EncryptMetadata false` are honoured. RC4 key
+  lengths outside 5–16 bytes and `/UE`/`/OE` values that are not 32 bytes are rejected.
+- **OCR adapters.** Tesseract and PaddleOCR runs have time limits and are stopped when they exceed them;
+  `PaddleOcrEngine.Dispose` can stop a busy worker; worker replies are matched by request id; temporary scan
+  images are owner-only and removed afterwards.
 
 ## 2.1.1 — 2026-06-26
 
