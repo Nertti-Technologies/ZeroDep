@@ -20,6 +20,9 @@ jobs:
           global-json-file: global.json
           dotnet-version: 10.0.x
 
+      - name: Third-party notices are up to date
+        run: build/generate-notices.sh --check
+
       - name: Restore
         run: dotnet restore ZeroDep.slnx
 

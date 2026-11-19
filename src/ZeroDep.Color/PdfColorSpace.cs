@@ -241,7 +241,8 @@ internal sealed class DeviceCmyk : PdfColorSpace
         double y = comps[offset + 2];
         double k = comps[offset + 3];
 
-        // Adobe-derived polynomial (as used by pdf.js); inputs in [0,1], output 0..255.
+        // Adobe-derived polynomial; coefficients reproduced under Apache-2.0 (see THIRD-PARTY-NOTICES.txt).
+        // Inputs in [0,1], output 0..255.
         double red = 255.0 +
             (c * ((-4.387332384609988 * c) + (54.48615194189176 * m) + (18.82290502165302 * y) + (212.25662451639585 * k) - 285.2331026137004)) +
             (m * ((1.7149763477362134 * m) - (5.6096736904047315 * y) - (17.873870861415444 * k) - 5.497006427196366)) +

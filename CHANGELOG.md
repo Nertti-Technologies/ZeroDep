@@ -15,6 +15,13 @@ All notable changes to **ZeroDep** are documented here. The format follows
 - **Builds use the .NET SDK 11.0.100+** (`global.json`, `rollForward: latestFeature`). Tests run on both
   `net10.0` and `net11.0`.
 
+### Added
+
+- **`THIRD-PARTY-NOTICES.txt`**, shipped in every package. It credits material that ZeroDep includes
+  under other licences: CMYK conversion coefficients (Apache-2.0), the JPEG 2000 bit-reader structure
+  (BSD-2-Clause) and a glyph-name list subset (BSD-3-Clause). The file is generated from `third-party/` by
+  `build/generate-notices.sh`, and CI fails when it is out of date.
+
 ## 2.1.1 — 2026-06-26
 
 ### Fixed

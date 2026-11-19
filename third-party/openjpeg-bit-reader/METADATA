@@ -1,0 +1,8 @@
+Component: OpenJPEG (JPEG 2000 packet-header bit reader, Tier-1 context grouping)
+Licence: BSD-2-Clause
+Copyright: See the copyright lines in the licence text below.
+Source: https://github.com/uclouvain/openjpeg/tree/8314119b067c0fc77834731168daaebd379fdb12
+Licence text: https://github.com/uclouvain/openjpeg/blob/8314119b067c0fc77834731168daaebd379fdb12/LICENSE
+Retrieved: 2026-11-19
+Used in: src/ZeroDep.Filters/Imaging/Jpx/JpxBitReader.cs, src/ZeroDep.Filters/Imaging/Jpx/JpxTier1.cs, shipped in ZeroDep.Filters
+Changes: The structure of the bit-unstuffing read path and the context-label grouping follow the upstream decoder; the code is a C# implementation written against ITU-T T.800.

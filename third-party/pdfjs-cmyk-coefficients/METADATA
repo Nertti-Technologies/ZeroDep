@@ -1,0 +1,8 @@
+Component: PDF.js (CMYK to RGB polynomial coefficients)
+Licence: Apache-2.0
+Copyright: Copyright 2012 Mozilla Foundation
+Source: https://github.com/mozilla/pdf.js/blob/22d5507352c1820bd6399c178f243411765f89a5/src/core/colorspace.js
+Licence text: https://github.com/mozilla/pdf.js/blob/22d5507352c1820bd6399c178f243411765f89a5/LICENSE
+Retrieved: 2026-11-19
+Used in: src/ZeroDep.Color/PdfColorSpace.cs (DeviceCMYK conversion), shipped in ZeroDep.Color
+Changes: The numeric coefficients of the CMYK to RGB polynomial are reproduced; the surrounding code is an independent C# implementation. The upstream project ships no NOTICE file.

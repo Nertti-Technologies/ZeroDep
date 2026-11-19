@@ -367,3 +367,7 @@ submitting; all targets must build clean (warnings are treated as errors).
 ## License
 
 Licensed under the [Apache License 2.0](https://github.com/Nerttiyana-Technologies/ZeroDep/blob/main/LICENSE).
+
+ZeroDep includes material from third parties under their own licences (Apache-2.0, BSD-2-Clause,
+BSD-3-Clause). Their notices are in `THIRD-PARTY-NOTICES.txt`, at the repository root and inside every
+NuGet package.

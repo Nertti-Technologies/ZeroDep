@@ -35,9 +35,10 @@
     <Version>2.2.0</Version>
   </PropertyGroup>
 
-  <!-- Embed the README in every package. -->
+  <!-- Embed the README and the third-party notices in every package. -->
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
   <!-- Multi-target polyfill so records/init work on netstandard2.0. -->
