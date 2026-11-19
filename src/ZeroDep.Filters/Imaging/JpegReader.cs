@@ -24,6 +24,12 @@ public static class JpegReader
             throw new ArgumentNullException(nameof(data));
         }
 
+        return DecoderBoundary.Run(() => ReadMetadataCore(data), "JPEG");
+    }
+
+    private static JpegMetadata ReadMetadataCore(byte[] data)
+    {
+
         if (data.Length < 2 || data[0] != 0xFF || data[1] != 0xD8)
         {
             throw new InvalidDataException("Not a JPEG: missing SOI marker.");

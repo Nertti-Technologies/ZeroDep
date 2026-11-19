@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace ZeroDep.Filters.Jpx;
 
@@ -17,6 +18,9 @@ public static class JpxDecode
     /// <param name="data">The embedded <c>/JPXDecode</c> bytes.</param>
     /// <param name="width">The PDF <c>/Width</c> (used only as a fallback if the codestream omits SIZ).</param>
     /// <param name="height">The PDF <c>/Height</c> (fallback only).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The codestream is malformed, its size exceeds the decode budget, or it disagrees with the PDF size.</exception>
+    /// <exception cref="NotSupportedException">The data is not a JPEG 2000 codestream.</exception>
     public static RasterImage Decode(byte[] data, int width, int height)
     {
         if (data is null)
@@ -24,6 +28,11 @@ public static class JpxDecode
             throw new ArgumentNullException(nameof(data));
         }
 
+        return DecoderBoundary.Run(() => DecodeCore(data, width, height), "JPXDecode");
+    }
+
+    private static RasterImage DecodeCore(byte[] data, int width, int height)
+    {
         JpxImage image = JpxCodestream.Parse(data);
         JpxSiz siz = image.Siz;
         int comps = siz.Components.Length;
@@ -35,6 +44,7 @@ public static class JpxDecode
         }
 
         int outComps = comps >= 3 ? 3 : 1;
+        CheckBudget(image, siz, w, h, comps, outComps, width, height);
         var channels = new byte[outComps][];
         for (int i = 0; i < outComps; i++)
         {
@@ -65,13 +75,89 @@ public static class JpxDecode
             {
                 DecodeTile(image, siz, kv.Key, kv.Value, channels, w, h);
             }
-            catch
+            catch (Exception ex) when (DecoderBoundary.IsIsolatable(ex))
             {
                 // A malformed tile is isolated; the rest of the image still decodes.
             }
         }
 
         return Interleave(channels, w, h, outComps);
+    }
+
+    // Rejects sizes whose decode would exceed the image budgets, before anything is allocated.
+    private static void CheckBudget(JpxImage image, JpxSiz siz, int w, int h, int comps, int outComps, int pdfWidth, int pdfHeight)
+    {
+        long pixels = (long)w * h;
+        if (pixels > Limits.MaxImagePixels)
+        {
+            throw new InvalidDataException($"JPEG 2000 image of {w}x{h} exceeds the {Limits.MaxImagePixels} pixel limit.");
+        }
+
+        // The output canvases (one byte per channel), plus the interleaved copy for colour.
+        long canvasBytes = pixels * outComps * (outComps == 1 ? 1 : 2);
+        if (canvasBytes > Limits.MaxDecodeWorkingSetBytes)
+        {
+            throw new InvalidDataException($"JPEG 2000 image of {w}x{h} exceeds the decode memory budget.");
+        }
+
+        if (pdfWidth > 0 && pdfHeight > 0
+            && (w > (long)pdfWidth * Limits.MaxDimensionMismatchFactor || h > (long)pdfHeight * Limits.MaxDimensionMismatchFactor))
+        {
+            throw new InvalidDataException($"JPEG 2000 size {w}x{h} disagrees with the PDF size {pdfWidth}x{pdfHeight}.");
+        }
+
+        // One tile is decoded at a time. Its working set per sample is a fixed part plus one code-block
+        // structure per code-block area, so tiny code blocks cost far more per pixel (see Limits).
+        long tileW = Math.Min(siz.XTsiz > 0 ? siz.XTsiz : w, w);
+        long tileH = Math.Min(siz.YTsiz > 0 ? siz.YTsiz : h, h);
+        long samples = tileW * tileH * comps;
+        long perBlockArea = Limits.JpxBytesPerCodeBlock / MinCodeBlockArea(image);
+        if (samples * (Limits.JpxBytesPerSample + Math.Max(1, perBlockArea)) > Limits.MaxDecodeWorkingSetBytes)
+        {
+            throw new InvalidDataException($"JPEG 2000 tile of {tileW}x{tileH}x{comps} exceeds the decode memory budget.");
+        }
+    }
+
+    // The smallest code-block area any coding style in the codestream can produce, including the clamp of
+    // code blocks to precinct size (JpxPackets.BuildResolution).
+    private static long MinCodeBlockArea(JpxImage image)
+    {
+        int minExp = ExponentSum(image.Cod);
+        foreach (JpxCod cod in image.ComponentCod.Values)
+        {
+            minExp = Math.Min(minExp, ExponentSum(cod));
+        }
+
+        foreach (JpxTileCoding tile in image.Tiles.Values)
+        {
+            if (tile.Cod is { } tileCod)
+            {
+                minExp = Math.Min(minExp, ExponentSum(tileCod));
+            }
+
+            foreach (JpxCod cod in tile.ComponentCod.Values)
+            {
+                minExp = Math.Min(minExp, ExponentSum(cod));
+            }
+        }
+
+        return 1L << Math.Min(minExp, 30);
+    }
+
+    private static int ExponentSum(JpxCod cod)
+    {
+        int xcb = cod.CodeBlockWidthExp;
+        int ycb = cod.CodeBlockHeightExp;
+        if (cod.PrecinctSizes is { } precincts)
+        {
+            for (int r = 0; r < precincts.Length; r++)
+            {
+                xcb = Math.Min(xcb, r == 0 ? precincts[r].X : precincts[r].X - 1);
+                ycb = Math.Min(ycb, r == 0 ? precincts[r].Y : precincts[r].Y - 1);
+            }
+        }
+
+        return Math.Max(xcb, 0) + Math.Max(ycb, 0);
     }
 
     private static void DecodeTile(
@@ -428,6 +514,11 @@ public static class JpxDecode
     {
         int w = Math.Max(1, width);
         int h = Math.Max(1, height);
+        if ((long)w * h > Limits.MaxImagePixels)
+        {
+            throw new InvalidDataException($"Image of {w}x{h} exceeds the {Limits.MaxImagePixels} pixel limit.");
+        }
+
         var samples = new byte[w * h];
         for (int i = 0; i < samples.Length; i++)
         {

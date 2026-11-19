@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 
 namespace ZeroDep.Filters.Jbig2;
 
@@ -30,7 +31,7 @@ internal readonly struct Jbig2Region
 /// </summary>
 internal static class Jbig2TextRegion
 {
-    public static Jbig2Region? Decode(byte[] d, int dataStart, int dataLen, IReadOnlyList<Jbig2Bitmap> symbols)
+    public static Jbig2Region? Decode(byte[] d, int dataStart, int dataLen, IReadOnlyList<Jbig2Bitmap> symbols, PixelBudget budget)
     {
         int p = dataStart;
         int regW = (int)U32(d, p);
@@ -69,6 +70,10 @@ internal static class Jbig2TextRegion
 
         int numInstances = (int)U32(d, p);
         p += 4;
+        if (numInstances < 0 || numInstances > Limits.MaxJbig2TextInstances)
+        {
+            throw new InvalidDataException($"JBIG2 text region declares more than {Limits.MaxJbig2TextInstances} instances.");
+        }
 
         int sbStrips = 1 << logStrips;
         int numSyms = symbols.Count;
@@ -86,6 +91,7 @@ internal static class Jbig2TextRegion
         var iari = new ArithContext(512);
         var iaid = new ArithContext(1 << (symCodeLen + 1));
 
+        budget.Charge(regW, regH, "JBIG2 text region");
         var region = new Jbig2Bitmap(regW, regH, (byte)sbDefPixel);
 
         int stripT = -Jbig2ArithInt.DecodeInt(mq, iadt) * sbStrips;
@@ -144,6 +150,8 @@ internal static class Jbig2TextRegion
                 Jbig2Bitmap? sym = id >= 0 && id < numSyms ? symbols[id] : null;
                 if (sym is not null)
                 {
+                    // Each placement composites the symbol's pixels, so placements draw on the allowance too.
+                    budget.Charge(sym.Width, sym.Height, "JBIG2 symbol placement");
                     Place(region, sym, ref curS, t, refCorner, transposed, sbCombOp);
                 }
 
