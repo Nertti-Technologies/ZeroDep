@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using ZeroDep.Abstractions;
 using ZeroDep.Objects;
 
 namespace ZeroDep.Color;
@@ -35,6 +36,12 @@ public abstract class PdfFunction
     public abstract int OutputCount { get; }
 
     /// <summary>
+    /// Upper bound on the work units one evaluation costs (one unit per operation), used to budget
+    /// per-pixel tint conversion. Saturates instead of overflowing.
+    /// </summary>
+    internal virtual long Cost => 1;
+
+    /// <summary>
     /// Evaluates the function: clamps inputs to <see cref="Domain"/>, evaluates, and clamps outputs to
     /// <see cref="Range"/> when present.
     /// </summary>
@@ -51,6 +58,11 @@ public abstract class PdfFunction
         for (int i = 0; i < m; i++)
         {
             double v = i < input.Length ? input[i] : 0.0;
+            if (double.IsNaN(v))
+            {
+                v = Domain[2 * i]; // NaN would pass the clamp and reach integer conversions
+            }
+
             x[i] = Clamp(v, Domain[2 * i], Domain[(2 * i) + 1]);
         }
 
@@ -78,6 +90,11 @@ public abstract class PdfFunction
     /// <param name="obj">The function object (may be an indirect reference).</param>
     /// <param name="resolve">Resolves indirect references to direct objects.</param>
     /// <param name="decodeStream">Decodes a stream's filters to its raw bytes (for Type 0 and Type 4).</param>
+    /// <exception cref="NotSupportedException">The function type is unsupported or its entries are malformed.</exception>
+    /// <exception cref="PdfSyntaxException">
+    /// The function nests deeper than the fixed limit, refers back to itself, has too many sub-functions,
+    /// or (Type 4) nests braces deeper than the fixed limit.
+    /// </exception>
     public static PdfFunction Parse(PdfObject obj, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream)
     {
         if (obj is null)
@@ -95,6 +112,46 @@ public abstract class PdfFunction
             throw new ArgumentNullException(nameof(decodeStream));
         }
 
+        return Parse(obj, new ParseContext(resolve, decodeStream), 0);
+    }
+
+    // Recursive parse. 'depth' bounds nesting; the context's active set holds the object numbers on the
+    // current path (a function that contains itself is reported), and its node count bounds the total
+    // number of sub-functions, which also bounds fan-out through shared sub-functions.
+    private protected static PdfFunction Parse(PdfObject obj, ParseContext ctx, int depth)
+    {
+        if (depth > Limits.MaxFunctionDepth)
+        {
+            throw new PdfSyntaxException($"Function nesting exceeds the limit of {Limits.MaxFunctionDepth}.");
+        }
+
+        if (++ctx.Nodes > Limits.MaxFunctionNodes)
+        {
+            throw new PdfSyntaxException($"Function has more than {Limits.MaxFunctionNodes} sub-functions.");
+        }
+
+        int objectNumber = obj is PdfReference reference ? reference.ObjectNumber : -1;
+        if (objectNumber >= 0 && !ctx.Active.Add(objectNumber))
+        {
+            throw new PdfSyntaxException("Function refers to itself.");
+        }
+
+        try
+        {
+            return ParseCore(obj, ctx, depth);
+        }
+        finally
+        {
+            if (objectNumber >= 0)
+            {
+                ctx.Active.Remove(objectNumber);
+            }
+        }
+    }
+
+    private static PdfFunction ParseCore(PdfObject obj, ParseContext ctx, int depth)
+    {
+        Func<PdfObject, PdfObject> resolve = ctx.Resolve;
         PdfObject ro = resolve(obj);
 
         if (ro is PdfArray array)
@@ -102,7 +159,7 @@ public abstract class PdfFunction
             var parts = new List<PdfFunction>(array.Count);
             foreach (PdfObject item in array.Items)
             {
-                parts.Add(Parse(item, resolve, decodeStream));
+                parts.Add(Parse(item, ctx, depth + 1));
             }
 
             return new FunctionArray(parts.ToArray());
@@ -113,7 +170,7 @@ public abstract class PdfFunction
         if (ro is PdfStream stream)
         {
             dict = stream.Dictionary;
-            streamData = decodeStream(stream);
+            streamData = ctx.DecodeStream(stream);
         }
         else if (ro is PdfDictionary d)
         {
@@ -124,7 +181,8 @@ public abstract class PdfFunction
             throw new NotSupportedException("Unsupported PDF function object.");
         }
 
-        int type = (int)(Num(dict["FunctionType"], resolve) ?? -1);
+        double typeNum = Num(dict["FunctionType"], resolve) ?? -1;
+        int type = typeNum >= 0 && typeNum <= 4 ? (int)typeNum : -1;
         double[] domain = NumArray(dict["Domain"], resolve) ?? new double[] { 0.0, 1.0 };
         double[]? range = NumArray(dict["Range"], resolve);
 
@@ -132,10 +190,35 @@ public abstract class PdfFunction
         {
             0 => SampledFunction.Create(dict, streamData ?? Array.Empty<byte>(), domain, range, resolve),
             2 => ExponentialFunction.Create(dict, domain, range, resolve),
-            3 => StitchingFunction.Create(dict, domain, range, resolve, decodeStream),
+            3 => StitchingFunction.Create(dict, domain, range, ctx, depth),
             4 => PostScriptFunction.Create(streamData ?? Array.Empty<byte>(), domain, range),
             _ => throw new NotSupportedException($"PDF function type {type} is not supported."),
         };
+    }
+
+    /// <summary>Adds two non-negative costs, saturating at a large bound instead of overflowing.</summary>
+    private protected static long AddCost(long a, long b)
+    {
+        const long Cap = long.MaxValue / 4;
+        return a >= Cap - b ? Cap : a + b;
+    }
+
+    /// <summary>Multiplies two non-negative costs, saturating at a large bound instead of overflowing.</summary>
+    private protected static long MulCost(long a, long b)
+    {
+        const long Cap = long.MaxValue / 4;
+        return b != 0 && a > Cap / b ? Cap : a * b;
+    }
+
+    /// <summary>Converts a double to int, mapping NaN to 0 and saturating out-of-range values.</summary>
+    private protected static int ToInt(double v)
+    {
+        if (double.IsNaN(v))
+        {
+            return 0;
+        }
+
+        return v >= int.MaxValue ? int.MaxValue : (v <= int.MinValue ? int.MinValue : (int)v);
     }
 
     private protected static double Clamp(double v, double lo, double hi)
@@ -188,11 +271,31 @@ public abstract class PdfFunction
         var result = new int[d.Length];
         for (int i = 0; i < d.Length; i++)
         {
-            result[i] = (int)Math.Round(d[i]);
+            result[i] = ToInt(Math.Round(d[i]));
         }
 
         return result;
     }
+}
+
+/// <summary>The delegates, active-reference set, and node count shared by one <see cref="PdfFunction.Parse(PdfObject, Func{PdfObject, PdfObject}, Func{PdfStream, byte[]})"/> call.</summary>
+internal sealed class ParseContext
+{
+    public ParseContext(Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream)
+    {
+        Resolve = resolve;
+        DecodeStream = decodeStream;
+    }
+
+    public Func<PdfObject, PdfObject> Resolve { get; }
+
+    public Func<PdfStream, byte[]> DecodeStream { get; }
+
+    /// <summary>Object numbers of the functions being parsed on the current path.</summary>
+    public HashSet<int> Active { get; } = new HashSet<int>();
+
+    /// <summary>Function objects parsed so far, including sub-functions.</summary>
+    public int Nodes { get; set; }
 }
 
 /// <summary>An array of one-output functions presented as a single multi-output function (§7.10.1).</summary>
@@ -215,6 +318,20 @@ internal sealed class FunctionArray : PdfFunction
             }
 
             return n;
+        }
+    }
+
+    internal override long Cost
+    {
+        get
+        {
+            long c = 1;
+            foreach (PdfFunction p in _parts)
+            {
+                c = AddCost(c, p.Cost);
+            }
+
+            return c;
         }
     }
 
@@ -249,6 +366,8 @@ internal sealed class ExponentialFunction : PdfFunction
     }
 
     public override int OutputCount => _c0.Length;
+
+    internal override long Cost => _c0.Length + 1;
 
     public static ExponentialFunction Create(PdfDictionary dict, double[] domain, double[]? range, Func<PdfObject, PdfObject> resolve)
     {
@@ -290,20 +409,40 @@ internal sealed class StitchingFunction : PdfFunction
 
     public override int OutputCount => _functions.Length > 0 ? _functions[0].OutputCount : 0;
 
-    public static StitchingFunction Create(
-        PdfDictionary dict, double[] domain, double[]? range, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream)
+    internal override long Cost
     {
+        get
+        {
+            // One sub-function runs per evaluation; charge the most expensive.
+            long c = 0;
+            foreach (PdfFunction f in _functions)
+            {
+                c = Math.Max(c, f.Cost);
+            }
+
+            return AddCost(c, _functions.Length + 1);
+        }
+    }
+
+    public static StitchingFunction Create(PdfDictionary dict, double[] domain, double[]? range, ParseContext ctx, int depth)
+    {
+        Func<PdfObject, PdfObject> resolve = ctx.Resolve;
         var functions = new List<PdfFunction>();
         if (resolve(dict["Functions"] ?? PdfNull.Instance) is PdfArray fns)
         {
             foreach (PdfObject f in fns.Items)
             {
-                functions.Add(Parse(f, resolve, decodeStream));
+                functions.Add(Parse(f, ctx, depth + 1));
             }
         }
 
         double[] bounds = NumArray(dict["Bounds"], resolve) ?? Array.Empty<double>();
         double[] encode = NumArray(dict["Encode"], resolve) ?? Array.Empty<double>();
+        if (functions.Count > 1 && bounds.Length < functions.Count - 1)
+        {
+            throw new NotSupportedException("Stitching function /Bounds is shorter than /Functions requires.");
+        }
+
         return new StitchingFunction(domain, range, functions.ToArray(), bounds, encode);
     }
 
@@ -358,17 +497,53 @@ internal sealed class SampledFunction : PdfFunction
 
     public override int OutputCount => _range.Length / 2;
 
+    // 2^m grid corners, each visiting m inputs and reading n samples.
+    internal override long Cost => MulCost(1L << InputCount, InputCount + OutputCount + 1);
+
     public static SampledFunction Create(PdfDictionary dict, byte[] data, double[] domain, double[]? range, Func<PdfObject, PdfObject> resolve)
     {
         int[] size = IntArray(dict["Size"], resolve) ?? Array.Empty<int>();
-        int bps = (int)(Num(dict["BitsPerSample"], resolve) ?? 8);
+        double bpsNum = Num(dict["BitsPerSample"], resolve) ?? 8;
+        int bps = ToInt(bpsNum);
+        if (bps != bpsNum || !IsAllowedBitsPerSample(bps))
+        {
+            throw new NotSupportedException($"Sampled function BitsPerSample {bpsNum} is not one of 1, 2, 4, 8, 12, 16, 24, 32.");
+        }
+
         double[] rng = range ?? Array.Empty<double>();
         int m = domain.Length / 2;
+        int n = rng.Length / 2;
+        if (m > Limits.MaxSampledInputs)
+        {
+            throw new NotSupportedException($"Sampled function has {m} inputs; at most {Limits.MaxSampledInputs} are supported.");
+        }
+
+        if (n > Limits.MaxComponents)
+        {
+            throw new NotSupportedException($"Sampled function has {n} outputs; at most {Limits.MaxComponents} are supported.");
+        }
+
+        for (int i = 0; i < m && i < size.Length; i++)
+        {
+            if (size[i] < 1)
+            {
+                throw new NotSupportedException("Sampled function /Size entries must be positive.");
+            }
+        }
 
         double[] encode = NumArray(dict["Encode"], resolve) ?? DefaultEncode(size, m);
         double[] decode = NumArray(dict["Decode"], resolve) ?? rng;
+        if (encode.Length < 2 * m || decode.Length < 2 * n)
+        {
+            throw new NotSupportedException("Sampled function /Encode or /Decode is shorter than its inputs or outputs require.");
+        }
+
         return new SampledFunction(domain, rng, size, bps, encode, decode, data);
     }
+
+    // ISO 32000-2 Table 39: BitsPerSample is 1, 2, 4, 8, 12, 16, 24, or 32.
+    private static bool IsAllowedBitsPerSample(int bps)
+        => bps is 1 or 2 or 4 or 8 or 12 or 16 or 24 or 32;
 
     private static double[] DefaultEncode(int[] size, int m)
     {
@@ -448,10 +623,22 @@ internal sealed class SampledFunction : PdfFunction
     {
         long bitPos = sampleIndex * _bps;
         long v = 0;
+        if ((_bps & 7) == 0)
+        {
+            long first = bitPos >> 3;
+            for (int i = 0; i < _bps >> 3; i++)
+            {
+                long bytePos = first + i;
+                v = (v << 8) | (bytePos >= 0 && bytePos < _samples.Length ? _samples[bytePos] : 0u);
+            }
+
+            return v;
+        }
+
         for (int i = 0; i < _bps; i++)
         {
             long bp = bitPos + i;
-            int bytePos = (int)(bp >> 3);
+            long bytePos = bp >> 3;
             int bit = 7 - (int)(bp & 7);
             int b = bytePos >= 0 && bytePos < _samples.Length ? (_samples[bytePos] >> bit) & 1 : 0;
             v = (v << 1) | (uint)b;

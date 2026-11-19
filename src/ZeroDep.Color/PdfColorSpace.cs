@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using ZeroDep.Abstractions;
 using ZeroDep.Objects;
 
 namespace ZeroDep.Color;
@@ -44,6 +46,10 @@ public abstract class PdfColorSpace
     /// <param name="resolve">Resolves indirect references.</param>
     /// <param name="decodeStream">Decodes a stream's filters (for ICCBased, Indexed lookup, tint streams).</param>
     /// <param name="namedLookup">Resolves a colour-space name against the page resources, or null.</param>
+    /// <exception cref="NotSupportedException">The colour space is unsupported, unknown, or malformed.</exception>
+    /// <exception cref="PdfSyntaxException">
+    /// The colour space nests deeper than the fixed limit or refers back to itself.
+    /// </exception>
     public static PdfColorSpace Resolve(
         PdfObject obj,
         Func<PdfObject, PdfObject> resolve,
@@ -65,6 +71,42 @@ public abstract class PdfColorSpace
             throw new ArgumentNullException(nameof(decodeStream));
         }
 
+        var ctx = new ResolveContext(resolve, decodeStream, namedLookup);
+        return Resolve(obj, ctx, 0);
+    }
+
+    // Recursive resolution. 'depth' bounds nesting (Indexed base, ICC /Alternate, Separation/DeviceN
+    // alternate, named lookups); the context's active set holds the object numbers on the current path,
+    // so a space that refers back to itself is reported instead of recursing forever.
+    private static PdfColorSpace Resolve(PdfObject obj, ResolveContext ctx, int depth)
+    {
+        if (depth > Limits.MaxColorSpaceDepth)
+        {
+            throw new PdfSyntaxException($"Colour space nesting exceeds the limit of {Limits.MaxColorSpaceDepth}.");
+        }
+
+        int objectNumber = obj is PdfReference reference ? reference.ObjectNumber : -1;
+        if (objectNumber >= 0 && !ctx.Active.Add(objectNumber))
+        {
+            throw new PdfSyntaxException("Colour space refers to itself.");
+        }
+
+        try
+        {
+            return ResolveCore(obj, ctx, depth);
+        }
+        finally
+        {
+            if (objectNumber >= 0)
+            {
+                ctx.Active.Remove(objectNumber);
+            }
+        }
+    }
+
+    private static PdfColorSpace ResolveCore(PdfObject obj, ResolveContext ctx, int depth)
+    {
+        Func<PdfObject, PdfObject> resolve = ctx.Resolve;
         PdfObject ro = resolve(obj);
 
         if (ro is PdfName name)
@@ -83,10 +125,10 @@ public abstract class PdfColorSpace
                 case "Pattern":
                     throw new NotSupportedException("Pattern color space is out of scope.");
                 default:
-                    PdfObject? named = namedLookup?.Invoke(name.Value);
+                    PdfObject? named = ctx.NamedLookup?.Invoke(name.Value);
                     if (named is not null && !ReferenceEquals(resolve(named), ro))
                     {
-                        return Resolve(named, resolve, decodeStream, namedLookup);
+                        return Resolve(named, ctx, depth + 1);
                     }
 
                     throw new NotSupportedException($"Unknown color space '{name.Value}'.");
@@ -95,23 +137,19 @@ public abstract class PdfColorSpace
 
         if (ro is PdfArray array && array.Count > 0 && resolve(array[0]) is PdfName family)
         {
-            return ResolveArray(family.Value, array, resolve, decodeStream, namedLookup);
+            return ResolveArray(family.Value, array, ctx, depth);
         }
 
         throw new NotSupportedException("Unsupported color space object.");
     }
 
-    private static PdfColorSpace ResolveArray(
-        string family,
-        PdfArray array,
-        Func<PdfObject, PdfObject> resolve,
-        Func<PdfStream, byte[]> decodeStream,
-        Func<string, PdfObject?>? namedLookup)
+    private static PdfColorSpace ResolveArray(string family, PdfArray array, ResolveContext ctx, int depth)
     {
+        Func<PdfObject, PdfObject> resolve = ctx.Resolve;
         switch (family)
         {
             case "ICCBased":
-                return ResolveIcc(array, resolve, decodeStream, namedLookup);
+                return ResolveIcc(array, ctx, depth);
 
             case "CalGray":
                 return DeviceGray.Instance; // approximate (gamma ignored)
@@ -124,13 +162,13 @@ public abstract class PdfColorSpace
 
             case "Indexed":
             case "I":
-                return IndexedColorSpace.Create(array, resolve, decodeStream, namedLookup);
+                return IndexedColorSpace.Create(array, ctx, depth);
 
             case "Separation":
-                return SeparationColorSpace.Create(array, 1, resolve, decodeStream, namedLookup);
+                return SeparationColorSpace.Create(array, ctx, depth);
 
             case "DeviceN":
-                return SeparationColorSpace.CreateDeviceN(array, resolve, decodeStream, namedLookup);
+                return SeparationColorSpace.CreateDeviceN(array, ctx, depth);
 
             case "Pattern":
                 throw new NotSupportedException("Pattern color space is out of scope.");
@@ -140,12 +178,9 @@ public abstract class PdfColorSpace
         }
     }
 
-    private static PdfColorSpace ResolveIcc(
-        PdfArray array,
-        Func<PdfObject, PdfObject> resolve,
-        Func<PdfStream, byte[]> decodeStream,
-        Func<string, PdfObject?>? namedLookup)
+    private static PdfColorSpace ResolveIcc(PdfArray array, ResolveContext ctx, int depth)
     {
+        Func<PdfObject, PdfObject> resolve = ctx.Resolve;
         // Pragmatic: use /Alternate when present, else map by /N (no profile parsing).
         if (array.Count > 1 && resolve(array[1]) is PdfStream st)
         {
@@ -154,7 +189,7 @@ public abstract class PdfColorSpace
             {
                 try
                 {
-                    return Resolve(alt, resolve, decodeStream, namedLookup);
+                    return Resolve(alt, ctx, depth + 1);
                 }
                 catch (NotSupportedException)
                 {
@@ -169,6 +204,19 @@ public abstract class PdfColorSpace
         return DeviceRgb.Instance;
     }
 
+    /// <summary>Resolves a nested colour space one level deeper (for the derived spaces' base/alternate).</summary>
+    private protected static PdfColorSpace ResolveNested(PdfObject obj, ResolveContext ctx, int depth)
+        => Resolve(obj, ctx, depth + 1);
+
+    /// <summary>Throws <see cref="NotSupportedException"/> unless <paramref name="array"/> has at least <paramref name="count"/> entries.</summary>
+    private protected static void RequireCount(PdfArray array, int count, string family)
+    {
+        if (array.Count < count)
+        {
+            throw new NotSupportedException($"{family} color space array is too short.");
+        }
+    }
+
     private protected static PdfColorSpace ByComponentCount(int n)
         => n switch
         {
@@ -179,9 +227,30 @@ public abstract class PdfColorSpace
 
     private protected static byte ToByte(double v01)
     {
-        int x = (int)Math.Round(v01 * 255.0, MidpointRounding.AwayFromZero);
-        return (byte)(x < 0 ? 0 : (x > 255 ? 255 : x));
+        // Clamp in floating point: NaN and huge values must not reach the int cast.
+        double x = Math.Round(v01 * 255.0, MidpointRounding.AwayFromZero);
+        return x >= 255.0 ? (byte)255 : (x > 0.0 ? (byte)x : (byte)0);
     }
+}
+
+/// <summary>The delegates and the active-reference set shared by one <see cref="PdfColorSpace.Resolve(PdfObject, Func{PdfObject, PdfObject}, Func{PdfStream, byte[]}, Func{string, PdfObject?})"/> call.</summary>
+internal sealed class ResolveContext
+{
+    public ResolveContext(Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream, Func<string, PdfObject?>? namedLookup)
+    {
+        Resolve = resolve;
+        DecodeStream = decodeStream;
+        NamedLookup = namedLookup;
+    }
+
+    public Func<PdfObject, PdfObject> Resolve { get; }
+
+    public Func<PdfStream, byte[]> DecodeStream { get; }
+
+    public Func<string, PdfObject?>? NamedLookup { get; }
+
+    /// <summary>Object numbers of the colour spaces being resolved on the current path.</summary>
+    public HashSet<int> Active { get; } = new HashSet<int>();
 }
 
 /// <summary>DeviceGray — a single [0,1] component rendered as neutral grey.</summary>
@@ -268,8 +337,8 @@ internal sealed class DeviceCmyk : PdfColorSpace
 
     private static byte ClampByte(double v)
     {
-        int x = (int)Math.Round(v, MidpointRounding.AwayFromZero);
-        return (byte)(x < 0 ? 0 : (x > 255 ? 255 : x));
+        double x = Math.Round(v, MidpointRounding.AwayFromZero);
+        return x >= 255.0 ? (byte)255 : (x > 0.0 ? (byte)x : (byte)0);
     }
 }
 
@@ -393,16 +462,18 @@ internal sealed class IndexedColorSpace : PdfColorSpace
     public override double[] DefaultDecode(int bitsPerComponent)
         => new[] { 0.0, (1 << bitsPerComponent) - 1.0 };
 
-    public static IndexedColorSpace Create(
-        PdfArray array,
-        Func<PdfObject, PdfObject> resolve,
-        Func<PdfStream, byte[]> decodeStream,
-        Func<string, PdfObject?>? namedLookup)
+    public static IndexedColorSpace Create(PdfArray array, ResolveContext ctx, int depth)
     {
-        PdfColorSpace baseCs = Resolve(array[1], resolve, decodeStream, namedLookup);
-        int hival = resolve(array[2]) is PdfNumber n ? (int)n.AsInt64 : 0;
+        // [/Indexed base hival lookup]
+        RequireCount(array, 4, "Indexed");
+        Func<PdfObject, PdfObject> resolve = ctx.Resolve;
+        PdfColorSpace baseCs = ResolveNested(array[1], ctx, depth);
 
-        byte[] lookup = ReadLookup(resolve(array[3]), decodeStream);
+        // §8.6.6.3: hival is 0..255; clamp so a huge value cannot size the palette.
+        double hv = resolve(array[2]) is PdfNumber n ? n.AsDouble : 0.0;
+        int hival = hv >= Limits.MaxIndexedHival ? Limits.MaxIndexedHival : (hv > 0 ? (int)hv : 0);
+
+        byte[] lookup = ReadLookup(resolve(array[3]), ctx.DecodeStream);
         int baseComps = baseCs.ComponentCount;
         double[] baseDecode = baseCs.DefaultDecode(8);
 
@@ -412,10 +483,10 @@ internal sealed class IndexedColorSpace : PdfColorSpace
         {
             for (int k = 0; k < baseComps; k++)
             {
-                int li = (i * baseComps) + k;
+                long li = ((long)i * baseComps) + k;
                 double sample = li < lookup.Length ? lookup[li] : 0.0;
-                double lo = baseDecode[2 * k];
-                double hi = baseDecode[(2 * k) + 1];
+                double lo = (2 * k) < baseDecode.Length ? baseDecode[2 * k] : 0.0;
+                double hi = ((2 * k) + 1) < baseDecode.Length ? baseDecode[(2 * k) + 1] : 1.0;
                 comp[k] = lo + ((sample / 255.0) * (hi - lo));
             }
 
@@ -430,15 +501,9 @@ internal sealed class IndexedColorSpace : PdfColorSpace
 
     public override void ToRgb(double[] comps, int offset, out byte r, out byte g, out byte b)
     {
-        int idx = (int)Math.Round(comps[offset], MidpointRounding.AwayFromZero);
-        if (idx < 0)
-        {
-            idx = 0;
-        }
-        else if (idx > _hival)
-        {
-            idx = _hival;
-        }
+        // Clamp in floating point before converting: NaN and out-of-range values must not reach the int cast.
+        double v = Math.Round(comps[offset], MidpointRounding.AwayFromZero);
+        int idx = v >= _hival ? _hival : (v > 0 ? (int)v : 0);
 
         r = _palette[(idx * 3) + 0];
         g = _palette[(idx * 3) + 1];
@@ -488,23 +553,40 @@ internal sealed class SeparationColorSpace : PdfColorSpace
         return d;
     }
 
-    public static SeparationColorSpace Create(
-        PdfArray array, int n, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream, Func<string, PdfObject?>? namedLookup)
+    /// <summary>Work units one tint conversion costs (the tint transform plus the alternate space).</summary>
+    internal long EvaluationCost => _tint.Cost + 1;
+
+    public static SeparationColorSpace Create(PdfArray array, ResolveContext ctx, int depth)
     {
         // [/Separation name alternateSpace tintTransform]
-        PdfColorSpace alt = Resolve(array[2], resolve, decodeStream, namedLookup);
-        PdfFunction tint = PdfFunction.Parse(array[3], resolve, decodeStream);
-        return new SeparationColorSpace(n, alt, tint, "Separation");
+        RequireCount(array, 4, "Separation");
+        return Build(1, array, ctx, depth, "Separation");
     }
 
-    public static SeparationColorSpace CreateDeviceN(
-        PdfArray array, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decodeStream, Func<string, PdfObject?>? namedLookup)
+    public static SeparationColorSpace CreateDeviceN(PdfArray array, ResolveContext ctx, int depth)
     {
         // [/DeviceN names alternateSpace tintTransform attributes?]
-        int n = resolve(array[1]) is PdfArray names ? names.Count : 1;
-        PdfColorSpace alt = Resolve(array[2], resolve, decodeStream, namedLookup);
-        PdfFunction tint = PdfFunction.Parse(array[3], resolve, decodeStream);
-        return new SeparationColorSpace(n, alt, tint, "DeviceN");
+        RequireCount(array, 4, "DeviceN");
+        int n = ctx.Resolve(array[1]) is PdfArray names ? names.Count : 1;
+        if (n < 1 || n > Limits.MaxComponents)
+        {
+            throw new NotSupportedException($"DeviceN with {n} colorants is not supported.");
+        }
+
+        return Build(n, array, ctx, depth, "DeviceN");
+    }
+
+    private static SeparationColorSpace Build(int n, PdfArray array, ResolveContext ctx, int depth, string family)
+    {
+        PdfColorSpace alt = ResolveNested(array[2], ctx, depth);
+        PdfFunction tint = PdfFunction.Parse(array[3], ctx.Resolve, ctx.DecodeStream);
+        if (tint.OutputCount < alt.ComponentCount)
+        {
+            throw new NotSupportedException(
+                $"{family} tint transform yields {tint.OutputCount} outputs; the alternate space needs {alt.ComponentCount}.");
+        }
+
+        return new SeparationColorSpace(n, alt, tint, family);
     }
 
     public override void ToRgb(double[] comps, int offset, out byte r, out byte g, out byte b)
@@ -516,6 +598,12 @@ internal sealed class SeparationColorSpace : PdfColorSpace
         }
 
         double[] alt = _tint.Evaluate(tintIn);
+        if (alt.Length < _alternate.ComponentCount)
+        {
+            // A stitching sub-function may yield fewer outputs than the first one declared.
+            Array.Resize(ref alt, _alternate.ComponentCount);
+        }
+
         _alternate.ToRgb(alt, 0, out r, out g, out b);
     }
 }

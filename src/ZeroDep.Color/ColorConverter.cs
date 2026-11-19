@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using ZeroDep.Filters;
 
 namespace ZeroDep.Color;
@@ -21,6 +23,10 @@ public static class ColorConverter
     /// <param name="bitsPerComponent">Bits per component: 1, 2, 4, 8, or 16.</param>
     /// <param name="colorSpace">The resolved colour space.</param>
     /// <param name="decode">The image's <c>/Decode</c> array, or null for the colour space default.</param>
+    /// <exception cref="InvalidDataException">
+    /// The image exceeds the fixed pixel or tint-work limits, has more than 32 components, or uses a
+    /// bit depth above 16.
+    /// </exception>
     public static RasterImage ToRgb(
         byte[] data, int width, int height, int components, int bitsPerComponent, PdfColorSpace colorSpace, double[]? decode = null)
     {
@@ -39,8 +45,25 @@ public static class ColorConverter
             return new RasterImage { Width = Math.Max(1, width), Height = Math.Max(1, height), Components = 1, Samples = Array.Empty<byte>() };
         }
 
+        // Bound the work and the output allocation before allocating (ADR-0010 §5.2-4).
+        long pixels = (long)width * height;
+        if (pixels > Limits.MaxImagePixels)
+        {
+            throw new InvalidDataException($"Image of {width}x{height} pixels exceeds the limit of {Limits.MaxImagePixels} pixels.");
+        }
+
+        if (components > Limits.MaxComponents || colorSpace.ComponentCount > Limits.MaxComponents)
+        {
+            throw new InvalidDataException($"Image has more than {Limits.MaxComponents} components.");
+        }
+
+        if (bitsPerComponent > 16)
+        {
+            throw new InvalidDataException($"Image bits per component {bitsPerComponent} exceeds 16.");
+        }
+
         double[] dec = decode is { Length: > 0 } ? decode : colorSpace.DefaultDecode(bitsPerComponent);
-        double maxVal = bitsPerComponent >= 31 ? int.MaxValue : (1 << bitsPerComponent) - 1.0;
+        double maxVal = (1 << bitsPerComponent) - 1.0;
         bool gray = colorSpace.IsGrayscale && colorSpace.ComponentCount == 1 && components == 1;
 
         int compBufLen = Math.Max(components, colorSpace.ComponentCount);
@@ -49,37 +72,72 @@ public static class ColorConverter
 
         if (gray)
         {
-            var outGray = new byte[width * height];
+            var outGray = new byte[pixels];
+            double dlo0 = dec.Length > 0 ? dec[0] : 0.0;
+            double dhi0 = dec.Length > 1 ? dec[1] : 1.0;
             for (int y = 0; y < height; y++)
             {
                 for (int x = 0; x < width; x++)
                 {
                     long bitPos = (y * rowStrideBits) + ((long)x * bitsPerComponent);
                     int raw = ReadBits(data, bitPos, bitsPerComponent);
-                    double v = dec[0] + ((raw / maxVal) * (dec[1] - dec[0]));
-                    outGray[(y * width) + x] = ToByte(v);
+                    double v = dlo0 + ((raw / maxVal) * (dhi0 - dlo0));
+                    outGray[(y * (long)width) + x] = ToByte(v);
                 }
             }
 
             return new RasterImage { Width = width, Height = height, Components = 1, Samples = outGray };
         }
 
-        var outRgb = new byte[width * height * 3];
+        // Tint transforms (Separation/DeviceN) run a function per pixel: cache the result per distinct raw
+        // sample tuple (packed into a long when it fits) and charge each evaluation to a work budget.
+        long tintCost = colorSpace is SeparationColorSpace sep ? sep.EvaluationCost : 0;
+        bool useCache = tintCost > 0 && (long)components * bitsPerComponent <= 62;
+        Dictionary<long, int>? cache = useCache ? new Dictionary<long, int>() : null;
+        long tintWork = 0;
+
+        var outRgb = new byte[pixels * 3];
         for (int y = 0; y < height; y++)
         {
             for (int x = 0; x < width; x++)
             {
                 long baseBit = (y * rowStrideBits) + ((long)x * components * bitsPerComponent);
+                long key = 0;
                 for (int c = 0; c < components; c++)
                 {
                     int raw = ReadBits(data, baseBit + ((long)c * bitsPerComponent), bitsPerComponent);
+                    key = (key << bitsPerComponent) | (uint)raw;
                     double dlo = (2 * c) < dec.Length ? dec[2 * c] : 0.0;
                     double dhi = ((2 * c) + 1) < dec.Length ? dec[(2 * c) + 1] : 1.0;
                     comp[c] = dlo + ((raw / maxVal) * (dhi - dlo));
                 }
 
-                colorSpace.ToRgb(comp, 0, out byte r, out byte g, out byte b);
-                int o = ((y * width) + x) * 3;
+                byte r, g, b;
+                if (cache is not null && cache.TryGetValue(key, out int packed))
+                {
+                    r = (byte)(packed >> 16);
+                    g = (byte)(packed >> 8);
+                    b = (byte)packed;
+                }
+                else
+                {
+                    if (tintCost > 0)
+                    {
+                        tintWork += tintCost;
+                        if (tintWork > Limits.MaxTintWork)
+                        {
+                            throw new InvalidDataException($"Image tint conversion exceeds the work limit of {Limits.MaxTintWork}.");
+                        }
+                    }
+
+                    colorSpace.ToRgb(comp, 0, out r, out g, out b);
+                    if (cache is not null && cache.Count < Limits.MaxTintCacheEntries)
+                    {
+                        cache[key] = (r << 16) | (g << 8) | b;
+                    }
+                }
+
+                long o = ((y * (long)width) + x) * 3;
                 outRgb[o] = r;
                 outRgb[o + 1] = g;
                 outRgb[o + 2] = b;
@@ -110,7 +168,7 @@ public static class ColorConverter
     {
         if (n == 8)
         {
-            int bp = (int)(bitPos >> 3);
+            long bp = bitPos >> 3;
             return bp >= 0 && bp < data.Length ? data[bp] : 0;
         }
 
@@ -118,7 +176,7 @@ public static class ColorConverter
         for (int i = 0; i < n; i++)
         {
             long bp = bitPos + i;
-            int bytePos = (int)(bp >> 3);
+            long bytePos = bp >> 3;
             int bit = 7 - (int)(bp & 7);
             int b = bytePos >= 0 && bytePos < data.Length ? (data[bytePos] >> bit) & 1 : 0;
             v = (v << 1) | b;
@@ -129,7 +187,8 @@ public static class ColorConverter
 
     private static byte ToByte(double v01)
     {
-        int x = (int)Math.Round(v01 * 255.0, MidpointRounding.AwayFromZero);
-        return (byte)(x < 0 ? 0 : (x > 255 ? 255 : x));
+        // Clamp in floating point: NaN and huge values must not reach the int cast.
+        double x = Math.Round(v01 * 255.0, MidpointRounding.AwayFromZero);
+        return x >= 255.0 ? (byte)255 : (x > 0.0 ? (byte)x : (byte)0);
     }
 }
