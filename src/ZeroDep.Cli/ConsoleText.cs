@@ -40,4 +40,14 @@ internal static class ConsoleText
         string label = string.IsNullOrEmpty(field.Label) ? "" : "   (" + Truncate(Clean(field.Label), 80) + ")";
         return $"  [{Clean(field.FieldType),-3}] {Clean(field.FullyQualifiedName)} = {value}{label}";
     }
+
+    /// <summary>
+    /// The report line for a document the analyzer rejected: a resource limit it exceeds, or a structure it
+    /// cannot read. The message can quote document content, so it is cleaned like any other value.
+    /// </summary>
+    public static string RejectionLine(PdfSyntaxException exception)
+    {
+        string reason = exception is PdfLimitExceededException ? "resource limit exceeded" : "unreadable document";
+        return $"rejected ({reason}): {Truncate(Clean(exception.Message), 200)}";
+    }
 }
