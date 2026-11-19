@@ -101,29 +101,7 @@ public sealed class BatchProcessor
                 return ValueTask.CompletedTask;
             }).ConfigureAwait(false);
 #else
-        using (var gate = new SemaphoreSlim(degree))
-        {
-            var tasks = new List<Task>();
-            foreach (string path in files)
-            {
-                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                tasks.Add(Task.Run(
-                    () =>
-                    {
-                        try
-                        {
-                            ProcessOne(path);
-                        }
-                        finally
-                        {
-                            gate.Release();
-                        }
-                    },
-                    cancellationToken));
-            }
-
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-        }
+        await BoundedParallel.ForEachAsync(files, degree, ProcessOne, cancellationToken).ConfigureAwait(false);
 #endif
 
         List<FileOutcome> all = outcomes.ToList();
