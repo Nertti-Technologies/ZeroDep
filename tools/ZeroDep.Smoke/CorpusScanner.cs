@@ -51,13 +51,13 @@ internal static class CorpusScanner
 
     /// <summary>
     /// Every <c>*.pdf</c> under <paramref name="corpus"/>, as real paths sorted ordinally (so a seeded sample is
-    /// reproducible). Throws <see cref="InvalidOperationException"/> when the corpus or any directory reached
-    /// through a link is forbidden.
+    /// reproducible). Throws <see cref="InvalidOperationException"/> when the corpus or any link target is forbidden.
     /// </summary>
-    public static IReadOnlyList<string> Scan(string corpus, string home) => Scan(corpus, home, ForbiddenRoots);
+    public static Task<IReadOnlyList<string>> ScanAsync(string corpus, string home, CancellationToken cancellationToken)
+        => ScanAsync(corpus, home, ForbiddenRoots, cancellationToken);
 
-    /// <summary>As <see cref="Scan(string, string)"/>, with the forbidden roots given (for tests).</summary>
-    public static IReadOnlyList<string> Scan(string corpus, string home, IReadOnlyList<string> forbidden)
+    /// <summary>As <see cref="ScanAsync(string, string, CancellationToken)"/>, with the forbidden roots given (for tests).</summary>
+    public static async Task<IReadOnlyList<string>> ScanAsync(string corpus, string home, IReadOnlyList<string> forbidden, CancellationToken cancellationToken)
     {
         string root = RealPath(Path.GetFullPath(corpus), home, forbidden, 0);
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"corpus not found: {corpus}");
@@ -68,21 +68,42 @@ internal static class CorpusScanner
         pending.Push(root);
         while (pending.Count > 0)
         {
-            string dir = RealPath(pending.Pop(), home, forbidden, 0);
+            string dir = pending.Pop(); // always a real, guarded path
             if (!visited.Add(dir)) continue;
 
-            foreach (string file in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+            foreach (string entry in await ListEntriesAsync(dir, cancellationToken).ConfigureAwait(false))
             {
-                if (file.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) files.Add(RealPath(file, home, forbidden, 0));
-            }
-
-            foreach (string sub in Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly))
-            {
-                pending.Push(sub);
+                // A link's target is read without following it (readlink) and guarded by RealPath before any call
+                // that follows it; only then is it asked whether it is a folder.
+                string real = new FileInfo(entry).LinkTarget is null ? entry : RealPath(entry, home, forbidden, 0);
+                if (Directory.Exists(real)) pending.Push(real);
+                else if (real.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) files.Add(real);
             }
         }
 
         return [.. files];
+    }
+
+    /// <summary>
+    /// The entries of one folder, listed by <c>find -P</c>, which reads them with <c>lstat</c> and never follows a
+    /// link. .NET's own enumeration calls <c>stat</c> on each link to learn whether its target is a folder, which
+    /// would reach a forbidden target before it could be guarded.
+    /// </summary>
+    private static async Task<IReadOnlyList<string>> ListEntriesAsync(string dir, CancellationToken cancellationToken)
+    {
+        CliRun find = await ChildProcess.RunAsync(
+            "find",
+            ["-P", dir, "-mindepth", "1", "-maxdepth", "1", "-print0"],
+            null,
+            TimeSpan.FromMinutes(2),
+            long.MaxValue,
+            cancellationToken).ConfigureAwait(false);
+        if (find.Killed is not null || find.ExitCode != 0)
+        {
+            throw new IOException($"could not list {dir}: {find.Killed ?? find.StdErr.Trim()}");
+        }
+
+        return find.StdOut.Split('\0', StringSplitOptions.RemoveEmptyEntries);
     }
 
     /// <summary>
@@ -104,8 +125,8 @@ internal static class CorpusScanner
 
         string resolved = Path.Combine(RealPath(parent, home, forbidden, hops), Path.GetFileName(full));
         Guard(resolved, home, forbidden);
-        FileSystemInfo info = Directory.Exists(resolved) ? new DirectoryInfo(resolved) : new FileInfo(resolved);
-        string? target = info.LinkTarget;
+        // readlink only: FileInfo.LinkTarget does not follow the link, and works for links to folders too.
+        string? target = new FileInfo(resolved).LinkTarget;
         if (target is null) return resolved;
 
         // One link at a time, so every hop of a chain is guarded before it is read.

@@ -161,10 +161,63 @@ public static class PdfAnalyzer
     /// <returns>The JSON document. A document that cannot be read is serialized as a rejected result.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="PdfSyntaxException">The result could not be serialized.</exception>
+    /// <remarks>
+    /// The JSON is built in memory, at about 5 bytes per character of output (a large book can produce hundreds of
+    /// megabytes of JSON). Use <see cref="WriteJson(Stream, Stream, AnalyzerOptions, bool)"/> to stream it instead.
+    /// </remarks>
     public static string ToJson(Stream stream, AnalyzerOptions options, bool indent = false)
     {
         DocumentAnalysis analysis = Analyze(stream, options);
         return ExceptionBoundary.Run(() => DocumentJson.Write(analysis, indent));
+    }
+
+    /// <summary>
+    /// Runs all features and writes the result to <paramref name="output"/> as UTF-8 JSON (no byte-order mark),
+    /// streamed rather than built in memory. The text is identical to <see cref="ToJson(Stream, AnalyzerOptions, bool)"/>.
+    /// </summary>
+    /// <param name="input">A readable PDF stream.</param>
+    /// <param name="output">A writable stream. It is flushed but left open.</param>
+    /// <param name="indent">Whether to pretty-print the JSON.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> or <paramref name="output"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="output"/> is not writable.</exception>
+    /// <exception cref="IOException">Writing to <paramref name="output"/> failed; what was written is incomplete.</exception>
+    public static void WriteJson(Stream input, Stream output, bool indent = false)
+        => WriteJson(input, output, new AnalyzerOptions(), indent);
+
+    /// <summary>
+    /// Runs all features and writes the result to <paramref name="output"/> as UTF-8 JSON (no byte-order mark),
+    /// streamed rather than built in memory. The text is identical to <see cref="ToJson(Stream, AnalyzerOptions, bool)"/>.
+    /// </summary>
+    /// <param name="input">A readable PDF stream.</param>
+    /// <param name="output">A writable stream. It is flushed but left open.</param>
+    /// <param name="options">The DPI threshold, the password and the resource limits to apply.</param>
+    /// <param name="indent">Whether to pretty-print the JSON.</param>
+    /// <remarks>
+    /// The analysis finishes before anything is written, so a document that cannot be read still produces one
+    /// complete <see cref="DocumentStatus.Rejected"/> result. Only a failure of <paramref name="output"/> itself
+    /// leaves partial JSON, and it is thrown, not hidden.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/>, <paramref name="output"/> or <paramref name="options"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="output"/> is not writable.</exception>
+    /// <exception cref="IOException">Writing to <paramref name="output"/> failed; what was written is incomplete.</exception>
+    /// <exception cref="PdfSyntaxException">The result could not be serialized (as for <c>ToJson</c>).</exception>
+    public static void WriteJson(Stream input, Stream output, AnalyzerOptions options, bool indent = false)
+    {
+        if (output is null) throw new ArgumentNullException(nameof(output));
+        if (!output.CanWrite) throw new ArgumentException("The output stream is not writable.", nameof(output));
+        DocumentAnalysis analysis = Analyze(input, options);
+
+        using StreamWriter writer = JsonOutput.CreateWriter(output);
+        try
+        {
+            DocumentJson.Write(analysis, writer, indent);
+            writer.Flush();
+        }
+        catch (Exception ex) when (ex is not IOException && ex is not PdfSyntaxException && ExceptionBoundary.IsTranslatable(ex))
+        {
+            // The ToJson contract: a serialization failure is a PdfSyntaxException. A failing output stays an IOException.
+            throw ExceptionBoundary.Translate(ex);
+        }
     }
 
     /// <summary>Enumerates the embedded image XObjects in a PDF, with their declared size, filter, and raw bytes.</summary>

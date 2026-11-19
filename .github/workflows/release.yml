@@ -74,8 +74,9 @@ jobs:
             echo "::error::$f was made for build inputs $(jq -r .buildInputs "$f"), but this release is $inputs. Re-run the smoke gate."
             exit 1
           fi
-          if ! jq -e '.failed == 0 and (.rejected == 0 or .rejectionsAccepted == true)' "$f" > /dev/null; then
-            echo "::error::$f records failed or unaccepted rejected documents."
+          # Hidden coupling: 20 is Attestation.MinimumSample in tools/ZeroDep.Smoke/Attestation.cs.
+          if ! jq -e '.sample >= 20 and .failed == 0 and (.rejected == 0 or .rejectionsAccepted == true)' "$f" > /dev/null; then
+            echo "::error::$f covers fewer than 20 documents, or records failed or unaccepted rejected documents."
             exit 1
           fi
           echo "Smoke attestation ok: $(jq -r '"\(.sample) documents, \(.rejected) rejected, seed \(.seed), \(.createdUtc)"' "$f")"

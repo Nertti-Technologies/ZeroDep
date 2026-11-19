@@ -44,7 +44,7 @@ static async Task<int> RunAsync(SmokeOptions options, CancellationToken cancella
     IReadOnlyList<string> corpus;
     try
     {
-        corpus = CorpusScanner.Scan(options.Corpus, home);
+        corpus = await CorpusScanner.ScanAsync(options.Corpus, home, cancellationToken).ConfigureAwait(false);
     }
     catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
     {
@@ -84,6 +84,12 @@ static async Task<int> RunAsync(SmokeOptions options, CancellationToken cancella
     IReadOnlyList<string> sample = options.All ? corpus : Sampler.Pick(corpus, options.Sample, options.Seed);
     Console.WriteLine($"Smoke: seed {options.Seed}, {sample.Count} of {corpus.Count} documents, one at a time " +
         $"(timeout {options.Timeout.TotalSeconds:F0} s, memory ceiling {options.MaxMemoryBytes / (1024 * 1024)} MB).");
+
+    if (inputsBefore is not null && sample.Count < Attestation.MinimumSample)
+    {
+        Console.Error.WriteLine($"--attest needs at least {Attestation.MinimumSample} documents; the corpus has {sample.Count}.");
+        return 2;
+    }
 
     var cli = new CliProcess(cliDll, options.Timeout, options.MaxMemoryBytes);
     var verdicts = new List<DocumentVerdict>();

@@ -15,8 +15,15 @@ public sealed class BatchOptions
     /// </summary>
     public string OutputDirectory { get; init; } = string.Empty;
 
-    /// <summary>The maximum number of files processed concurrently. Defaults to the processor count.</summary>
-    public int MaxConcurrency { get; init; } = Environment.ProcessorCount;
+    /// <summary>
+    /// The default for <see cref="MaxConcurrency"/>: the processor count, but at most 4 (ADR-0013). <b>Estimate</b>:
+    /// one large book's analysis peaks at about 320 MB, so 4 at once stay near 1.3 GB, where one worker per core
+    /// on a 16-core machine could reach about 5 GB.
+    /// </summary>
+    public static int DefaultMaxConcurrency => Math.Min(Environment.ProcessorCount, 4);
+
+    /// <summary>The maximum number of files processed concurrently. Defaults to <see cref="DefaultMaxConcurrency"/>.</summary>
+    public int MaxConcurrency { get; init; } = DefaultMaxConcurrency;
 
     /// <summary>The effective-DPI threshold below which images are flagged.</summary>
     public int DpiThreshold { get; init; } = AnalyzerOptions.DefaultDpiThreshold;

@@ -63,6 +63,19 @@ public sealed class DocumentBudgetTests
     }
 
     [Fact]
+    public void Charge_AtASaturatedBudget_CannotOverflowPastIt()
+    {
+        // A budget of long.MaxValue (a saturated allowance) must still stop the counter instead of wrapping negative.
+        var budget = new ResourceBudget(new PdfLimits { MaxWorkPerDocument = long.MaxValue });
+
+        budget.Charge(long.MaxValue - 1);
+        budget.Charge(1);
+        Assert.Throws<PdfLimitExceededException>(() => budget.Charge(1));
+        Assert.Throws<PdfLimitExceededException>(() => budget.Charge(0)); // the breach stays sticky
+        Assert.Equal(long.MaxValue, budget.Work);
+    }
+
+    [Fact]
     public void Charge_WithoutAnAllowance_KeepsThePlainMessage()
     {
         var budget = new ResourceBudget(new PdfLimits { MaxWorkPerDocument = 10 });

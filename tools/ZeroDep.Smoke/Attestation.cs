@@ -13,6 +13,12 @@ internal static class Attestation
 
     public const string RelativePath = "build/smoke-attestation.json";
 
+    /// <summary>
+    /// The fewest documents an attestation may cover: 20, the sample the owner chose for releases (2026-11-20).
+    /// Hidden coupling: release.yml checks <c>.sample &gt;= 20</c>; change both together.
+    /// </summary>
+    public const int MinimumSample = 20;
+
     public static string Write(string buildInputs, int seed, IReadOnlyList<DocumentVerdict> verdicts, bool rejectionsAccepted, DateTimeOffset now)
     {
         var buffer = new MemoryStream();

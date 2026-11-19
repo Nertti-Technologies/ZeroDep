@@ -37,8 +37,13 @@ if (!File.Exists(path))
 
 if (json)
 {
+    // Streamed (ADR-0013): a large book produces hundreds of megabytes of JSON, which must not be built in memory.
+    // The raw standard output is used, so the bytes are UTF-8 whatever the console encoding is.
     using FileStream s = File.OpenRead(path);
-    Console.WriteLine(PdfAnalyzer.ToJson(s, indent: true, threshold, password));
+    using Stream stdout = Console.OpenStandardOutput();
+    PdfAnalyzer.WriteJson(s, stdout, new AnalyzerOptions { DpiThreshold = threshold, Password = password }, indent: true);
+    byte[] newline = System.Text.Encoding.UTF8.GetBytes(Environment.NewLine); // as Console.WriteLine ended it before
+    stdout.Write(newline, 0, newline.Length);
     return 0;
 }
 
@@ -121,7 +126,7 @@ static async Task<int> RunBatchAsync(string[] args)
     string? pw = null;
     bool resume = true;
     bool perFile = true;
-    int concurrency = Environment.ProcessorCount;
+    int concurrency = BatchOptions.DefaultMaxConcurrency;
 
     for (int i = 1; i < args.Length; i++)
     {

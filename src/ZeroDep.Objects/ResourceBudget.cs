@@ -18,6 +18,7 @@ namespace ZeroDep.Objects;
 internal sealed class ResourceBudget
 {
     private long _work;
+    private bool _exceeded;
 
     /// <summary>Creates a budget with no per-byte allowance (for content run without a source file).</summary>
     public ResourceBudget(PdfLimits limits)
@@ -49,12 +50,15 @@ internal sealed class ResourceBudget
     /// <exception cref="PdfLimitExceededException">The total exceeds <see cref="MaxWork"/>.</exception>
     public void Charge(long units)
     {
-        _work += units;
-        if (_work > MaxWork)
+        // Compared before adding, so the counter cannot overflow even when MaxWork saturates at long.MaxValue.
+        if (_exceeded || units > MaxWork - _work)
         {
+            _exceeded = true;
             // The limit name stays MaxWorkPerDocument: IsDocumentLimit and callers match on it.
             throw new PdfLimitExceededException(nameof(PdfLimits.MaxWorkPerDocument), MaxWork, LimitMessage());
         }
+
+        _work += units;
     }
 
     private string LimitMessage()

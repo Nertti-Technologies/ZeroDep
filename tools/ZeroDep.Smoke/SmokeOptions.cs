@@ -79,6 +79,12 @@ internal sealed class SmokeOptions
             return null;
         }
 
+        if (attest && !all && sample < Attestation.MinimumSample)
+        {
+            error = $"--attest needs at least {Attestation.MinimumSample} documents: use --sample={Attestation.MinimumSample} or more, or --all";
+            return null;
+        }
+
         if (attest && !build)
         {
             error = "--attest builds the CLI itself, so it cannot vouch for a binary built earlier: drop --no-build";

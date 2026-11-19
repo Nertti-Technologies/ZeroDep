@@ -121,6 +121,11 @@ public sealed class PdfLimits
     /// allowance off. <b>Estimate</b>: a 435-page scanned book with a text layer measured about 138 units per
     /// byte, and a born-digital 800-page book under 16, so the default gives the scanned book about 1.85×
     /// headroom.
+    /// <para>
+    /// The allowance follows the file's size, not how much of it is ever read, so bytes padded onto a file raise
+    /// its budget too: at the measured 31–40 ns per unit, each megabyte adds about 10 s of CPU. A service that
+    /// accepts files from untrusted sources should cap the upload size, or set this to 0 for a fixed budget.
+    /// </para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public long WorkPerSourceByte

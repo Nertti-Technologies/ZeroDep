@@ -156,6 +156,14 @@ string json = PdfAnalyzer.ToJson(File.OpenRead("invoice.pdf"), indent: true);
 File.WriteAllText("invoice.json", json);
 ```
 
+`ToJson` builds the whole document in memory. For large files, stream it instead; the output is identical
+(UTF-8, no byte-order mark):
+
+```csharp
+using FileStream output = File.Create("book.json");
+PdfAnalyzer.WriteJson(File.OpenRead("book.pdf"), output, indent: true);
+```
+
 ### Decode a JPEG to pixels
 
 ```csharp
@@ -318,7 +326,8 @@ zerodep batch ./corpus --output=./batch-out
 The `batch` verb is **resumable** and **parallel**. It writes three things under the output folder:
 a resumable ledger, optional per-file JSON (`--no-perfile` to skip), and a publishable
 `aggregate.json` containing **aggregates and counts only** — no file names, extracted text, or field
-values. Useful flags: `--concurrency=N`, `--threshold=N`, `--no-resume`, `--no-perfile`.
+values. Useful flags: `--concurrency=N` (default: the processor count, at most 4), `--threshold=N`,
+`--no-resume`, `--no-perfile`.
 
 ### Batch from code
 

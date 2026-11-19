@@ -68,4 +68,49 @@ public sealed class DocumentJsonTests
         Assert.Equal("t0", cover.GetProperty("id").GetString());
         Assert.Equal(3, cover.GetProperty("bounds").GetProperty("width").GetDouble());
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StreamedWrite_IsIdenticalToTheString(bool indent)
+    {
+        // The escape and number edge cases of the 2.1.x fixes: a lone surrogate, a surrogate pair, the JavaScript
+        // line and paragraph separators, a control character, and non-finite numbers.
+        var analysis = new DocumentAnalysis
+        {
+            Status = DocumentStatus.Rejected,
+            Rejection = new RejectionInfo { Reason = RejectionReason.ResourceLimitExceeded, Detail = "lone \ud800 pair \ud83d\ude00" },
+            PageCount = 1,
+            ImageAreaFraction = double.NaN,
+            TextRuns = new[]
+            {
+                new TextRunInfo { Text = "sep \u2028 \u2029 ctl \u0001 \"q\" \\", X = double.PositiveInfinity, FontSize = 0.1 },
+            },
+            Form = new AcroFormReport { Fields = new[] { new FormFieldInfo { FullyQualifiedName = "f", IsChecked = true } } },
+            Pages = new[] { new PageClassification { Incomplete = true, IncompleteReasons = new[] { "a", "b" } } },
+        };
+
+        var output = new StringWriter();
+        DocumentJson.Write(analysis, output, indent);
+
+        Assert.Equal(DocumentJson.Write(analysis, indent), output.ToString());
+        using JsonDocument _ = JsonDocument.Parse(output.ToString());
+    }
+
+    [Fact]
+    public void StreamedWrite_LeavesTheWriterOpen()
+    {
+        var output = new StringWriter();
+        DocumentJson.Write(new DocumentAnalysis(), output);
+
+        output.Write('!'); // still usable
+        Assert.EndsWith("}!", output.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StreamedWrite_ChecksArguments()
+    {
+        Assert.Throws<ArgumentNullException>(() => DocumentJson.Write(null!, new StringWriter()));
+        Assert.Throws<ArgumentNullException>(() => DocumentJson.Write(new DocumentAnalysis(), (TextWriter)null!));
+    }
 }

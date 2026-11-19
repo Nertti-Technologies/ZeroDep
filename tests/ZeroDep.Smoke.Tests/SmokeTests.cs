@@ -24,9 +24,9 @@ public sealed class SmokeOptionsTests
     [Fact]
     public void Flags_AreRead()
     {
-        SmokeOptions o = SmokeOptions.Parse(["c", "--sample=2", "--seed=42", "--timeout=30", "--max-memory-mb=512", "--attest", "--accept-rejections"], 0, out _)!;
+        SmokeOptions o = SmokeOptions.Parse(["c", "--sample=25", "--seed=42", "--timeout=30", "--max-memory-mb=512", "--attest", "--accept-rejections"], 0, out _)!;
 
-        Assert.Equal(2, o.Sample);
+        Assert.Equal(25, o.Sample);
         Assert.Equal(42, o.Seed);
         Assert.Equal(TimeSpan.FromSeconds(30), o.Timeout);
         Assert.Equal(512L * 1024 * 1024, o.MaxMemoryBytes);
@@ -44,8 +44,19 @@ public sealed class SmokeOptionsTests
         new[] { "c", "--bogus" },
         new[] { "c", "d" },
         new[] { "c", "--accept-rejections" },
-        new[] { "c", "--attest", "--no-build" },
+        new[] { "c", "--attest", "--no-build", "--sample=20" },
+        new[] { "c", "--attest" },              // the default sample of 5 is too small to attest a release
+        new[] { "c", "--attest", "--sample=19" },
     };
+
+    [Theory]
+    [InlineData("--sample=20")]
+    [InlineData("--all")]
+    public void Attest_AcceptsTheMinimumSampleOrAll(string size)
+    {
+        Assert.NotNull(SmokeOptions.Parse(["c", "--attest", size], 0, out string? error));
+        Assert.Null(error);
+    }
 
     [Theory]
     [MemberData(nameof(InvalidArgs))]
@@ -90,14 +101,36 @@ public sealed class CorpusScannerTests
     }
 
     [Fact]
-    public void AForbiddenCorpus_IsRefusedWithoutTouchingIt()
+    public async Task AForbiddenCorpus_IsRefusedWithoutTouchingIt()
     {
-        var ex = Assert.Throws<InvalidOperationException>(() => CorpusScanner.Scan("/Volumes/never-touched", Home));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CorpusScanner.ScanAsync("/Volumes/never-touched", Home, CancellationToken.None));
         Assert.Contains("refusing", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Scan_FollowsLocalLinksOnceAndFindsOnlyPdfs()
+    public async Task Scan_RefusesADanglingLinkIntoForbiddenStorage()
+    {
+        // The target does not exist, so nothing but the link text can reveal where it points: the guard must act on
+        // that text alone, before anything follows the link.
+        string root = Path.Combine(Path.GetTempPath(), "zerodep-scan-" + Guid.NewGuid().ToString("N"));
+        string corpus = Path.Combine(root, "corpus");
+        Directory.CreateDirectory(corpus);
+        try
+        {
+            string gone = Path.Combine(CorpusScanner.RealPath(root, Home), "pretend-nas", "books");
+            Directory.CreateSymbolicLink(Path.Combine(corpus, "nas"), gone);
+            string[] roots = [Path.Combine(CorpusScanner.RealPath(root, Home), "pretend-nas")];
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => CorpusScanner.ScanAsync(corpus, Home, roots, CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Scan_FollowsLocalLinksOnceAndFindsOnlyPdfs()
     {
         string root = Path.Combine(Path.GetTempPath(), "zerodep-scan-" + Guid.NewGuid().ToString("N"));
         string corpus = Path.Combine(root, "corpus");
@@ -113,7 +146,7 @@ public sealed class CorpusScannerTests
             Directory.CreateSymbolicLink(Path.Combine(corpus, "linked"), elsewhere);
             Directory.CreateSymbolicLink(Path.Combine(corpus, "sub", "loop"), corpus); // a cycle back to the root
 
-            IReadOnlyList<string> files = CorpusScanner.Scan(corpus, Home);
+            IReadOnlyList<string> files = await CorpusScanner.ScanAsync(corpus, Home, CancellationToken.None);
 
             Assert.Equal(3, files.Count);
             Assert.Contains(files, f => f.EndsWith("a.pdf", StringComparison.Ordinal));
@@ -128,7 +161,7 @@ public sealed class CorpusScannerTests
     }
 
     [Fact]
-    public void Scan_RefusesALinkIntoForbiddenStorage()
+    public async Task Scan_RefusesALinkIntoForbiddenStorage()
     {
         string root = Path.Combine(Path.GetTempPath(), "zerodep-scan-" + Guid.NewGuid().ToString("N"));
         string corpus = Path.Combine(root, "corpus");
@@ -141,7 +174,7 @@ public sealed class CorpusScannerTests
             Directory.CreateSymbolicLink(Path.Combine(corpus, "nas"), forbidden);
             string[] roots = [CorpusScanner.RealPath(forbidden, Home)];
 
-            var ex = Assert.Throws<InvalidOperationException>(() => CorpusScanner.Scan(corpus, Home, roots));
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => CorpusScanner.ScanAsync(corpus, Home, roots, CancellationToken.None));
             Assert.Contains("refusing", ex.Message, StringComparison.Ordinal);
         }
         finally
@@ -151,7 +184,7 @@ public sealed class CorpusScannerTests
     }
 
     [Fact]
-    public void Scan_RefusesAFileLinkIntoForbiddenStorage()
+    public async Task Scan_RefusesAFileLinkIntoForbiddenStorage()
     {
         string root = Path.Combine(Path.GetTempPath(), "zerodep-scan-" + Guid.NewGuid().ToString("N"));
         string corpus = Path.Combine(root, "corpus");
@@ -164,7 +197,7 @@ public sealed class CorpusScannerTests
             File.CreateSymbolicLink(Path.Combine(corpus, "b.pdf"), Path.Combine(forbidden, "b.pdf"));
             string[] roots = [CorpusScanner.RealPath(forbidden, Home)];
 
-            Assert.Throws<InvalidOperationException>(() => CorpusScanner.Scan(corpus, Home, roots));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => CorpusScanner.ScanAsync(corpus, Home, roots, CancellationToken.None));
         }
         finally
         {
