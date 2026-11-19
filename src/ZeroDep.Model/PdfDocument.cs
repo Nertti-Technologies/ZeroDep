@@ -32,6 +32,20 @@ internal sealed class PdfDocument : IDisposable
     /// <summary>The number of pages.</summary>
     public int PageCount => Pages.Count;
 
+    /// <summary>
+    /// The per-document limits and work counter (ADR-0010 option A3). Every analysis of this document passes it
+    /// explicitly to the layers that need it.
+    /// </summary>
+    public ResourceBudget Budget => _file.Budget;
+
+    /// <summary>The caller's limits for this document.</summary>
+    public PdfLimits Limits => _file.Budget.Limits;
+
+    /// <summary>Decodes a stream's filter chain within this document's limits.</summary>
+    /// <exception cref="PdfLimitExceededException">The decoded output exceeds <see cref="PdfLimits.MaxDecodedStreamBytes"/>.</exception>
+    /// <exception cref="PdfSyntaxException">The stream cannot be decoded.</exception>
+    public byte[] Decode(PdfStream stream) => StreamDecoder.Decode(stream, _file.Budget.Limits);
+
     /// <summary>Resolves an indirect reference against the underlying file.</summary>
     public PdfObject Resolve(PdfObject value) => _file.Resolve(value);
 
@@ -56,11 +70,18 @@ internal sealed class PdfDocument : IDisposable
     /// <summary>The permission flags.</summary>
     public int Permissions => _file.Permissions;
 
-    /// <summary>Opens a document and builds its page list.</summary>
+    /// <summary>Opens a document within the default <see cref="PdfLimits"/> and builds its page list.</summary>
     /// <exception cref="PdfSyntaxException">The document is malformed or exceeds a structural limit.</exception>
-    public static PdfDocument Open(Stream stream, string? password = null)
+    public static PdfDocument Open(Stream stream, string? password = null) => Open(stream, password, PdfLimits.Default);
+
+    /// <summary>Opens a document within <paramref name="limits"/> and builds its page list.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="limits"/> is null.</exception>
+    /// <exception cref="PdfLimitExceededException">The document exceeds a limit while its structure is read.</exception>
+    /// <exception cref="PdfSyntaxException">The document is malformed.</exception>
+    public static PdfDocument Open(Stream stream, string? password, PdfLimits limits)
     {
-        PdfFile file = PdfFile.Open(stream, password);
+        if (limits is null) throw new ArgumentNullException(nameof(limits));
+        PdfFile file = PdfFile.Open(stream, password, limits);
         try
         {
             if (file.IsEncrypted && file.Authentication == AuthenticationResult.Failed)

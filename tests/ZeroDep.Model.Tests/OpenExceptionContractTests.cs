@@ -33,7 +33,7 @@ public sealed class OpenExceptionContractTests
 
         Assert.True(task.Wait(TimeSpan.FromSeconds(10)), "Open did not finish within 10 s.");
         Assert.True(allocated < 300L * 1024 * 1024, $"Open allocated {allocated / (1024 * 1024)} MiB.");
-        return Assert.IsType<PdfSyntaxException>(caught);
+        return Assert.IsAssignableFrom<PdfSyntaxException>(caught);
     }
 
     private static byte[] Classic(string catalog, string trailerExtra = "")
@@ -53,7 +53,8 @@ public sealed class OpenExceptionContractTests
     public void DeeplyNestedCatalogIsASyntaxError()
     {
         const int depth = 100_000;
-        OpenThrows(Classic("<< /Type /Catalog /Pages 2 0 R /X " + new string('[', depth) + new string(']', depth) + " >>"));
+        PdfSyntaxException ex = OpenThrows(Classic("<< /Type /Catalog /Pages 2 0 R /X " + new string('[', depth) + new string(']', depth) + " >>"));
+        Assert.Equal("MaxNestingDepth", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]

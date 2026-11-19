@@ -1,8 +1,9 @@
 namespace ZeroDep.Objects;
 
 /// <summary>
-/// Fixed resource limits for the object layer (ADR-0010 §3A, phase 1). Phase 2 replaces the budget values
-/// here with caller-supplied limits; the structural invariants stay fixed.
+/// Fixed limits of the object layer (ADR-0010 §3A). The largest object window is the caller's
+/// <see cref="ZeroDep.Abstractions.PdfLimits.MaxDecodedStreamBytes"/>, and object reads are charged to the
+/// document work budget (<see cref="ResourceBudget"/>); only the structural invariants stay here.
 /// </summary>
 internal static class Limits
 {
@@ -20,10 +21,16 @@ internal static class Limits
     public const int InitialObjectWindow = 64 * 1024;
 
     /// <summary>
-    /// Largest window one indirect object may need: the decoded-stream budget of 256 MiB (ADR-0010 §5.1,
-    /// estimate: ten times the largest content stream expected in office documents).
+    /// Largest window any limit can allow: the largest byte array the runtime supports (0x7FFFFFC7), since a
+    /// window is read into one array.
     /// </summary>
-    public const int MaxObjectWindow = 256 * 1024 * 1024;
+    public const int MaxArrayLength = 0x7FFFFFC7;
+
+    /// <summary>
+    /// Bytes of object window charged as one unit of document work (64), as for Form XObject content. ADR-0010
+    /// amendment 4; <b>estimate</b>: scanning and copying a byte costs far less than interpreting an operator.
+    /// </summary>
+    public const int ObjectBytesPerWorkUnit = 64;
 
     /// <summary>Largest byte width of one cross-reference stream <c>/W</c> field: 8 bytes, the range of a <see cref="long"/>.</summary>
     public const int MaxXrefFieldWidth = 8;

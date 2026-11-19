@@ -33,7 +33,16 @@ internal sealed class PdfFile : IDisposable
     private StandardSecurityHandler? _handler;
     private int _encryptObjectNumber = -1;
 
-    private PdfFile(PdfByteSource source) => _source = source;
+    private readonly ResourceBudget _budget;
+
+    private PdfFile(PdfByteSource source, ResourceBudget budget)
+    {
+        _source = source;
+        _budget = budget;
+    }
+
+    /// <summary>The per-document limits and work counter, shared by every layer that reads this file.</summary>
+    public ResourceBudget Budget => _budget;
 
     /// <summary>The document trailer (newest), providing <c>/Root</c>, <c>/Size</c>, etc.</summary>
     public PdfDictionary Trailer => _trailer!;
@@ -63,12 +72,22 @@ internal sealed class PdfFile : IDisposable
     public int Permissions { get; private set; }
 
     /// <summary>Opens a PDF from a stream, resolves its cross-reference, and configures decryption.</summary>
-    public static PdfFile Open(Stream stream, string? password = null)
+    public static PdfFile Open(Stream stream, string? password = null) => Open(stream, password, PdfLimits.Default);
+
+    /// <summary>
+    /// Opens a PDF from a stream within <paramref name="limits"/>, resolves its cross-reference, and configures
+    /// decryption. The file owns a new <see cref="ResourceBudget"/> for these limits.
+    /// </summary>
+    /// <exception cref="PdfLimitExceededException">The file exceeds a limit while its structure is read.</exception>
+    /// <exception cref="PdfSyntaxException">The file structure cannot be read.</exception>
+    public static PdfFile Open(Stream stream, string? password, PdfLimits limits)
     {
+        if (limits is null) throw new ArgumentNullException(nameof(limits));
+        var budget = new ResourceBudget(limits);
         var source = PdfByteSource.Create(stream);
         try
         {
-            var file = new PdfFile(source);
+            var file = new PdfFile(source, budget);
             file.BuildCrossReference();
             file.SetupEncryption(password);
             return file;
@@ -211,9 +230,9 @@ internal sealed class PdfFile : IDisposable
     {
         long trailerPos = _source.IndexOf(TrailerKeyword, position);
         if (trailerPos < 0) throw new PdfSyntaxException("Classic cross-reference table without a trailer.");
-        if (trailerPos - position > Limits.MaxObjectWindow)
+        if (trailerPos - position > MaxObjectWindow)
         {
-            throw new PdfSyntaxException("Classic cross-reference table exceeds the 256 MiB window limit.");
+            throw WindowLimit($"Classic cross-reference table at offset {position}");
         }
 
         byte[] tableBytes = _source.ReadBytes(position, (int)(trailerPos - position));
@@ -262,7 +281,7 @@ internal sealed class PdfFile : IDisposable
         if (LoadObjectAt(position) is not PdfStream stream) throw new PdfSyntaxException("Expected a cross-reference stream.");
 
         PdfDictionary dict = stream.Dictionary;
-        byte[] data = StreamDecoder.Decode(stream);
+        byte[] data = StreamDecoder.Decode(stream, _budget.Limits);
 
         if (dict["W"] is not PdfArray widths || widths.Count < 3) throw new PdfSyntaxException("Cross-reference stream missing /W.");
         int w0 = WidthAt(widths, 0);
@@ -331,9 +350,12 @@ internal sealed class PdfFile : IDisposable
 
         // Read a window that starts at 64 KiB and doubles, instead of reading up to the next 'endobj' or
         // EOF. Many objects without 'endobj' would otherwise each read the rest of the file, which is
-        // quadratic in time and allocation (ADR-0010 §5.2 item 6).
+        // quadratic in time and allocation (ADR-0010 §5.2 item 6). The bytes each read examines are charged
+        // to the document work budget (one unit per 64 bytes, ADR-0010 amendment 4), so many such objects
+        // together are bounded too: the doubling bounds one object, the budget bounds their number.
         long available = _source.Length - offset;
-        int windowLength = (int)Math.Min(Limits.InitialObjectWindow, available);
+        int maxWindow = MaxObjectWindow;
+        int windowLength = (int)Math.Min(Math.Min(Limits.InitialObjectWindow, available), maxWindow);
         while (true)
         {
             byte[] window = _source.ReadBytes(offset, windowLength);
@@ -342,19 +364,30 @@ internal sealed class PdfFile : IDisposable
             if (endObj >= 0 || atEof)
             {
                 int end = endObj >= 0 ? endObj + EndObjKeyword.Length : window.Length;
+                _budget.Charge(1 + (end / Limits.ObjectBytesPerWorkUnit));
                 return ParseIndirectObject(window, end, offset, requireComplete: false)!;
             }
 
+            _budget.Charge(1 + (window.Length / Limits.ObjectBytesPerWorkUnit));
             PdfObject? value = ParseIndirectObject(window, window.Length, offset, requireComplete: true);
             if (value is not null) return value;
 
-            if (windowLength >= Limits.MaxObjectWindow)
+            if (windowLength >= maxWindow)
             {
-                throw new PdfSyntaxException($"Object at offset {offset} exceeds the {Limits.MaxObjectWindow / (1024 * 1024)} MiB window limit.");
+                throw WindowLimit($"Object at offset {offset}");
             }
-            windowLength = (int)Math.Min(Math.Min((long)windowLength * 2, Limits.MaxObjectWindow), available);
+            windowLength = (int)Math.Min(Math.Min((long)windowLength * 2, maxWindow), available);
         }
     }
+
+    // The largest object window: the caller's decoded-stream budget, capped at the largest byte array.
+    private int MaxObjectWindow => (int)Math.Min(_budget.Limits.MaxDecodedStreamBytes, Limits.MaxArrayLength);
+
+    private PdfLimitExceededException WindowLimit(string what)
+        => new PdfLimitExceededException(
+            nameof(PdfLimits.MaxDecodedStreamBytes),
+            _budget.Limits.MaxDecodedStreamBytes,
+            $"{what} exceeds the window limit of {MaxObjectWindow} bytes.");
 
     // Parses "n g obj value" from window[0..end). With requireComplete, returns null when the result could
     // change if the window were wider: the parse ran into the window end, or the token after the value is
@@ -381,7 +414,7 @@ internal sealed class PdfFile : IDisposable
         {
             value = parser.ParseValue();
         }
-        catch (PdfSyntaxException) when (requireComplete && parser.ReachedEnd)
+        catch (PdfSyntaxException ex) when (requireComplete && parser.ReachedEnd && ex is not PdfLimitExceededException)
         {
             return null;
         }
@@ -530,7 +563,10 @@ internal sealed class PdfFile : IDisposable
         // The parser bounds nesting already; the walk checks again so it never relies on that.
         if (depth > Limits.MaxNestingDepth)
         {
-            throw new PdfSyntaxException($"Object nesting exceeds the limit of {Limits.MaxNestingDepth} levels.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxNestingDepth),
+                Limits.MaxNestingDepth,
+                $"Object nesting exceeds the limit of {Limits.MaxNestingDepth} levels.");
         }
 
         switch (value)
@@ -601,7 +637,7 @@ internal sealed class PdfFile : IDisposable
         if (_xref!.TryGetValue(objectStreamNumber, out var entry) && entry.Type == XrefEntryType.InUse
             && GetObject(objectStreamNumber) is PdfStream stream)
         {
-            byte[] decoded = StreamDecoder.Decode(stream);
+            byte[] decoded = StreamDecoder.Decode(stream, _budget.Limits);
             long count = GetIntOrNull(stream.Dictionary, "N") ?? 0;
             long first = GetIntOrNull(stream.Dictionary, "First") ?? 0;
 
