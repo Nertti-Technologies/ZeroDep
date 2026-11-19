@@ -296,7 +296,7 @@ public sealed class PdfAnalyzerLimitsTests
     private static string Ops(int count) => string.Concat(Enumerable.Repeat("n ", count));
 
     // One page per content string, all sharing a Helvetica font /F1.
-    private static byte[] Pages(params string[] contents)
+    internal static byte[] Pages(params string[] contents)
     {
         var objects = new List<object>
         {

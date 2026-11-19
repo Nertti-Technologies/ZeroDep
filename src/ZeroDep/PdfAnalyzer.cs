@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.CompilerServices;
 using ZeroDep.Abstractions;
 using ZeroDep.Analysis;
 using ZeroDep.Json;
@@ -33,6 +34,8 @@ public static class PdfAnalyzer
     /// <param name="password">Password for an encrypted document (empty/default if null).</param>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     /// <exception cref="PdfSyntaxException">The document cannot be read.</exception>
+    // A literal null binds here, as it did before the AnalyzerOptions overload existed.
+    [OverloadResolutionPriority(1)]
     public static AcroFormReport ExtractForm(Stream stream, string? password = null)
         => ExtractForm(stream, new AnalyzerOptions { Password = password });
 
@@ -74,6 +77,8 @@ public static class PdfAnalyzer
     /// <param name="password">Password for an encrypted document (empty/default if null).</param>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     /// <exception cref="PdfSyntaxException">The document cannot be read.</exception>
+    // A literal null binds here, as it did before the AnalyzerOptions overload existed.
+    [OverloadResolutionPriority(1)]
     public static IReadOnlyList<TextRunInfo> ExtractText(Stream stream, string? password = null)
         => ExtractText(stream, new AnalyzerOptions { Password = password });
 
@@ -94,6 +99,8 @@ public static class PdfAnalyzer
     /// <param name="password">Password for an encrypted document (empty/default if null).</param>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     /// <exception cref="PdfSyntaxException">The document cannot be read.</exception>
+    // A literal null binds here, as it did before the AnalyzerOptions overload existed.
+    [OverloadResolutionPriority(1)]
     public static string ExtractPlainText(Stream stream, string? password = null)
         => ExtractPlainText(stream, new AnalyzerOptions { Password = password });
 
@@ -165,6 +172,8 @@ public static class PdfAnalyzer
     /// <param name="password">Password for an encrypted document (empty/default if null).</param>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     /// <exception cref="PdfSyntaxException">The document cannot be read.</exception>
+    // A literal null binds here, as it did before the AnalyzerOptions overload existed.
+    [OverloadResolutionPriority(1)]
     public static IReadOnlyList<PdfImageInfo> ExtractImages(Stream stream, string? password = null)
         => ExtractImages(stream, new AnalyzerOptions { Password = password });
 
@@ -189,6 +198,8 @@ public static class PdfAnalyzer
     /// <param name="password">Password for an encrypted document (empty/default if null).</param>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     /// <exception cref="PdfSyntaxException">The document cannot be read.</exception>
+    // A literal null binds here, as it did before the AnalyzerOptions overload existed.
+    [OverloadResolutionPriority(1)]
     public static IReadOnlyList<ColorImage> ExtractColorImages(Stream stream, string? password = null)
         => ExtractColorImages(stream, new AnalyzerOptions { Password = password });
 

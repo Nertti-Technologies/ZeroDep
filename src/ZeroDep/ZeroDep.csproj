@@ -16,4 +16,12 @@
     <ProjectReference Include="..\ZeroDep.Analysis\ZeroDep.Analysis.csproj" />
     <ProjectReference Include="..\ZeroDep.Json\ZeroDep.Json.csproj" />
   </ItemGroup>
+
+  <!-- Overload priority for the PdfAnalyzer password overloads on netstandard2.0 (newer targets ship the
+       attribute). Only this project uses it; compiling it into every project would clash through
+       InternalsVisibleTo. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <Compile Include="$(MSBuildThisFileDirectory)../../build/OverloadResolutionPriorityAttribute.cs" Link="Polyfills/OverloadResolutionPriorityAttribute.cs" />
+  </ItemGroup>
+
 </Project>
