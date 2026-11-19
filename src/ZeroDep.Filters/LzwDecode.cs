@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZeroDep.Abstractions;
 
 namespace ZeroDep.Filters;
 
@@ -13,7 +14,7 @@ public static class LzwDecode
     private const int ClearTable = 256;
     private const int EndOfData = 257;
 
-    /// <summary>Decodes LZW data and applies an optional PNG/TIFF predictor.</summary>
+    /// <summary>Decodes LZW data and applies an optional PNG/TIFF predictor, within the default <see cref="PdfLimits"/>.</summary>
     /// <param name="input">The compressed bytes.</param>
     /// <param name="predictor">The <c>/Predictor</c> value (1 = none).</param>
     /// <param name="colors">The <c>/Colors</c> value (samples per pixel).</param>
@@ -22,30 +23,63 @@ public static class LzwDecode
     /// <param name="earlyChange">The <c>/EarlyChange</c> value (default 1).</param>
     /// <returns>The decoded bytes.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="input"/> is null.</exception>
-    /// <exception cref="InvalidDataException">The predictor parameters are invalid, or the output exceeds 256 MiB.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The predictor parameters are invalid, or the output exceeds <see cref="PdfLimits.MaxDecodedStreamBytes"/>
+    /// (256 MiB by default).
+    /// </exception>
     public static byte[] Decode(byte[] input, int predictor, int colors, int bitsPerComponent, int columns, int earlyChange)
+        => Decode(input, PdfLimits.Default, predictor, colors, bitsPerComponent, columns, earlyChange);
+
+    /// <summary>Decodes LZW data and applies an optional PNG/TIFF predictor, within <paramref name="limits"/>.</summary>
+    /// <param name="input">The compressed bytes.</param>
+    /// <param name="limits">The limits to apply; <see cref="PdfLimits.MaxDecodedStreamBytes"/> bounds the output.</param>
+    /// <param name="predictor">The <c>/Predictor</c> value (1 = none).</param>
+    /// <param name="colors">The <c>/Colors</c> value (samples per pixel).</param>
+    /// <param name="bitsPerComponent">The <c>/BitsPerComponent</c> value.</param>
+    /// <param name="columns">The <c>/Columns</c> value (samples per row).</param>
+    /// <param name="earlyChange">The <c>/EarlyChange</c> value (1 in PDF files that omit it).</param>
+    /// <returns>The decoded bytes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> or <paramref name="limits"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The predictor parameters are invalid; or the output exceeds <see cref="PdfLimits.MaxDecodedStreamBytes"/>, in
+    /// which case the inner exception is a <see cref="PdfLimitExceededException"/> naming the limit.
+    /// </exception>
+    public static byte[] Decode(byte[] input, PdfLimits limits, int predictor, int colors, int bitsPerComponent, int columns, int earlyChange)
     {
-        byte[] raw = Decode(input, earlyChange);
+        byte[] raw = Decode(input, limits, earlyChange);
         return predictor <= 1
             ? raw
             : DecoderBoundary.Run(() => Predictor.Apply(raw, predictor, colors, bitsPerComponent, columns), "LZWDecode");
     }
 
-    /// <summary>Decodes LZW data (no predictor).</summary>
+    /// <summary>Decodes LZW data (no predictor), within the default <see cref="PdfLimits"/>.</summary>
     /// <param name="input">The compressed bytes.</param>
     /// <param name="earlyChange">The <c>/EarlyChange</c> value (default 1).</param>
     /// <returns>The decoded bytes.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="input"/> is null.</exception>
-    /// <exception cref="InvalidDataException">The output exceeds 256 MiB.</exception>
-    public static byte[] Decode(byte[] input, int earlyChange = 1)
+    /// <exception cref="InvalidDataException">The output exceeds <see cref="PdfLimits.MaxDecodedStreamBytes"/> (256 MiB by default).</exception>
+    public static byte[] Decode(byte[] input, int earlyChange = 1) => Decode(input, PdfLimits.Default, earlyChange);
+
+    /// <summary>Decodes LZW data (no predictor), within <paramref name="limits"/>.</summary>
+    /// <param name="input">The compressed bytes.</param>
+    /// <param name="limits">The limits to apply; <see cref="PdfLimits.MaxDecodedStreamBytes"/> bounds the output.</param>
+    /// <param name="earlyChange">The <c>/EarlyChange</c> value (default 1).</param>
+    /// <returns>The decoded bytes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="input"/> or <paramref name="limits"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The output exceeds <see cref="PdfLimits.MaxDecodedStreamBytes"/>; the inner exception is a
+    /// <see cref="PdfLimitExceededException"/> naming the limit.
+    /// </exception>
+    public static byte[] Decode(byte[] input, PdfLimits limits, int earlyChange = 1)
     {
         if (input is null) throw new ArgumentNullException(nameof(input));
-        return DecoderBoundary.Run(() => DecodeCore(input, earlyChange), "LZWDecode");
+        if (limits is null) throw new ArgumentNullException(nameof(limits));
+        return DecoderBoundary.Run(() => DecodeCore(input, earlyChange, limits), "LZWDecode");
     }
 
-    private static byte[] DecodeCore(byte[] input, int earlyChange)
+    private static byte[] DecodeCore(byte[] input, int earlyChange, PdfLimits limits)
     {
-        var output = new BoundedOutput(input.Length * 3);
+        var output = new BoundedOutput(input.Length * 3L, limits);
         var table = new List<byte[]>(4096);
         void Reset()
         {

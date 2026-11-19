@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using Xunit;
+using ZeroDep.Abstractions;
 using ZeroDep.Filters;
 
 namespace ZeroDep.Filters.Tests;
@@ -30,7 +31,9 @@ public sealed class StreamFilterLimitTests
         byte[] bomb = Zlib(new byte[300 * MiB]);   // a few hundred KB that inflate to 300 MiB
 
         var ex = Bounded.Throws<InvalidDataException>(() => FlateDecode.Decode(bomb));
-        Assert.Contains("256 MiB", ex.Message, StringComparison.Ordinal);
+        var limit = Assert.IsType<PdfLimitExceededException>(ex.InnerException);
+        Assert.Equal(nameof(PdfLimits.MaxDecodedStreamBytes), limit.LimitName);
+        Assert.Equal(256L * 1024 * 1024, limit.Limit);
     }
 
     [Fact]

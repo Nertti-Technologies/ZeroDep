@@ -1,29 +1,13 @@
 namespace ZeroDep.Filters;
 
 /// <summary>
-/// Fixed resource limits for the stream and image decoders (ADR-0010 §3A and §5.1, phase 1). Phase 2
-/// replaces the budget values here with caller-supplied limits; the structural invariants stay fixed.
+/// Fixed limits of the stream and image decoders (ADR-0010 §3A). The caller-configurable budgets (decoded
+/// stream size, image pixels and the decode working set derived from them) come from
+/// <see cref="ZeroDep.Abstractions.PdfLimits"/>, passed to each decoder; only the structural invariants and
+/// per-format constants stay here.
 /// </summary>
 internal static class Limits
 {
-    /// <summary>
-    /// Largest decoded output of one stream filter: 256 MiB. Estimate (ADR-0010 §5.1): ten times the largest
-    /// content stream expected in office documents.
-    /// </summary>
-    public const long MaxDecodedStreamBytes = 256L * 1024 * 1024;
-
-    /// <summary>
-    /// Largest image, in pixels: 2^28 (268,435,456). Estimate (ADR-0010 §5.1): an A4 page at 1200 dpi is
-    /// 8.27 x 11.69 in x 1200^2 ≈ 139 M px, so 2^28 gives about 1.9x headroom.
-    /// </summary>
-    public const long MaxImagePixels = 1L << 28;
-
-    /// <summary>
-    /// Target peak allocation of one image decode: 1 GiB (the ADR-0010 phase-1 goal). Decoders whose working
-    /// set per pixel is large derive a stricter pixel cap from it.
-    /// </summary>
-    public const long MaxDecodeWorkingSetBytes = 1L << 30;
-
     /// <summary>
     /// How far an image's own declared size may exceed the PDF <c>/Width</c> or <c>/Height</c>: a factor of 4
     /// per dimension. Estimate: real files agree exactly; 4 tolerates a mis-declared resolution level.
@@ -49,7 +33,8 @@ internal static class Limits
     /// <summary>
     /// JPEG 2000 working set per code block: 160 bytes. Measured on the same codestream with 1x1, 4x4 and 8x8
     /// code blocks: 166, 16.2 and 8.8 bytes per sample, which fits 6.4 + 160 / (code-block area). Tiny code
-    /// blocks (a missing COD, or 1-pixel precincts) make this the dominant cost: 1 GiB / 167 B ≈ 6.4 M samples.
+    /// blocks (a missing COD, or 1-pixel precincts) make this the dominant cost: at the default 1 GiB working set
+    /// (4 bytes per pixel of the default pixel limit), 1 GiB / 167 B ≈ 6.4 M samples.
     /// </summary>
     public const long JpxBytesPerCodeBlock = 160;
 

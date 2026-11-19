@@ -47,7 +47,8 @@ internal static class Jbig2SymbolDict
         p += 4;
         if (numExSyms < 0 || numExSyms > Limits.MaxJbig2Symbols || numNewSyms < 0 || numNewSyms > Limits.MaxJbig2Symbols)
         {
-            throw new InvalidDataException($"JBIG2 symbol dictionary declares more than {Limits.MaxJbig2Symbols} symbols.");
+            throw DecoderBoundary.FixedLimit(
+                nameof(Limits.MaxJbig2Symbols), Limits.MaxJbig2Symbols, $"JBIG2 symbol dictionary declares more than {Limits.MaxJbig2Symbols} symbols.");
         }
 
         var mq = new MqDecoder(d, p, dataStart + dataLen);

@@ -1,4 +1,5 @@
 using Xunit;
+using ZeroDep.Abstractions;
 using ZeroDep.Filters;
 using ZeroDep.Filters.Jbig2;
 using ZeroDep.Filters.Jpx;
@@ -291,5 +292,78 @@ public sealed class ImageDecoderLimitTests
     {
         byte[] data = Jpeg(16, 16, tables: false);
         Bounded.Throws<InvalidDataException>(() => JpegDecoder.Decode(data));
+    }
+
+    // ---- Injected PdfLimits (ADR-0010 phase 2) ----
+
+    private static readonly PdfLimits SmallImages = new PdfLimits { MaxImagePixels = 1000 };
+
+    private static void AssertImageLimit(Action decode)
+    {
+        var ex = Bounded.Throws<InvalidDataException>(decode, maxBytes: 16 * MiB);
+        var inner = Assert.IsType<PdfLimitExceededException>(ex.InnerException);
+        Assert.Equal(nameof(PdfLimits.MaxImagePixels), inner.LimitName);
+        Assert.Equal(1000, inner.Limit);
+    }
+
+    [Fact]
+    public void JpegOverTheInjectedPixelLimitIsRejected()
+    {
+        byte[] data = Jpeg(40, 40);
+
+        AssertImageLimit(() => JpegDecoder.Decode(data, SmallImages));
+        AssertImageLimit(() => JpegDecoder.Decode(data, SmallImages, preserveCmyk: true));
+        Assert.Equal(40, JpegDecoder.Decode(data).Width);
+    }
+
+    [Fact]
+    public void JpegWorkingSetFollowsTheInjectedPixelLimit()
+    {
+        // 30 x 30 = 900 pixels fit a 901-pixel limit, but three padded 32 x 32 planes plus the RGB output
+        // (3,072 + 2,700 bytes) exceed its working set of 4 x 901 = 3,604 bytes.
+        byte[] data = Jpeg(30, 30, components: 3);
+        var limits = new PdfLimits { MaxImagePixels = 901 };
+
+        var ex = Bounded.Throws<InvalidDataException>(() => JpegDecoder.Decode(data, limits), maxBytes: 16 * MiB);
+        var inner = Assert.IsType<PdfLimitExceededException>(ex.InnerException);
+        Assert.Equal(nameof(PdfLimits.MaxImagePixels), inner.LimitName);
+        Assert.Contains("memory budget", inner.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JpxOverTheInjectedPixelLimitIsRejected()
+    {
+        byte[] data = Jpx(40);
+
+        AssertImageLimit(() => JpxDecode.Decode(data, SmallImages, 40, 40));
+        Assert.Equal(40, JpxDecode.Decode(data, 40, 40).Width);
+    }
+
+    [Fact]
+    public void Jbig2PageOverTheInjectedPixelLimitIsRejected()
+    {
+        AssertImageLimit(() => Jbig2Decode.Decode(Array.Empty<byte>(), SmallImages, null, 40, 40));
+        Assert.Equal(1600, Jbig2Decode.Decode(Array.Empty<byte>(), null, 40, 40).Samples.Length);
+    }
+
+    [Fact]
+    public void CcittOverTheInjectedPixelLimitIsRejected()
+    {
+        var parms = new CcittParams { K = -1, Columns = 40, Rows = 40 };
+
+        AssertImageLimit(() => CcittFaxDecode.Decode(new byte[] { 0xFF }, SmallImages, parms));
+        Assert.Null(Bounded.Run(() => CcittFaxDecode.Decode(new byte[] { 0xFF }, parms)));
+    }
+
+    [Fact]
+    public void ImageDecodersRejectNullLimits()
+    {
+        byte[] data = { 0 };
+
+        Assert.Throws<ArgumentNullException>(() => JpegDecoder.Decode(data, (PdfLimits)null!));
+        Assert.Throws<ArgumentNullException>(() => JpxDecode.Decode(data, null!, 1, 1));
+        Assert.Throws<ArgumentNullException>(() => Jbig2Decode.Decode(data, null!, null, 1, 1));
+        Assert.Throws<ArgumentNullException>(() => CcittFaxDecode.Decode(data, null!, new CcittParams()));
+        Assert.Throws<ArgumentNullException>(() => CcittFaxDecode.Decode(data, PdfLimits.Default, null!));
     }
 }
