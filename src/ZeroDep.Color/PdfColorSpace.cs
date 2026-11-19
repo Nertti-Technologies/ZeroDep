@@ -48,7 +48,8 @@ public abstract class PdfColorSpace
     /// <param name="namedLookup">Resolves a colour-space name against the page resources, or null.</param>
     /// <exception cref="NotSupportedException">The colour space is unsupported, unknown, or malformed.</exception>
     /// <exception cref="PdfSyntaxException">
-    /// The colour space nests deeper than the fixed limit or refers back to itself.
+    /// The colour space refers back to itself, or nests deeper than the fixed limit (reported as the derived
+    /// <see cref="PdfLimitExceededException"/>).
     /// </exception>
     public static PdfColorSpace Resolve(
         PdfObject obj,
@@ -82,7 +83,10 @@ public abstract class PdfColorSpace
     {
         if (depth > Limits.MaxColorSpaceDepth)
         {
-            throw new PdfSyntaxException($"Colour space nesting exceeds the limit of {Limits.MaxColorSpaceDepth}.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxColorSpaceDepth),
+                Limits.MaxColorSpaceDepth,
+                $"Colour space nesting exceeds the limit of {Limits.MaxColorSpaceDepth}.");
         }
 
         int objectNumber = obj is PdfReference reference ? reference.ObjectNumber : -1;

@@ -2,8 +2,9 @@ namespace ZeroDep.Color;
 
 /// <summary>
 /// Resource limits for colour-space, function and image-conversion work (ADR-0010 §3A). Each value is
-/// either a spec limit or a labelled estimate. Phase 2 replaces the budgets here with values passed in
-/// from the caller's limits; the structural invariants stay fixed.
+/// either a spec limit or a labelled estimate. The image pixel budget comes from the caller's
+/// <see cref="ZeroDep.Abstractions.PdfLimits.MaxImagePixels"/> (the RGB output is 3 bytes per pixel, so at the
+/// default 2^28 pixels the peak is 768 MiB); the structural invariants and the tint-work constants stay fixed.
 /// </summary>
 internal static class Limits
 {
@@ -46,13 +47,6 @@ internal static class Limits
 
     /// <summary>Highest Indexed <c>hival</c> (255), as ISO 32000-2 §8.6.6.3 specifies.</summary>
     public const int MaxIndexedHival = 255;
-
-    /// <summary>
-    /// Pixels per converted image (2^28 = 268,435,456). <b>Estimate</b> (ADR-0010 §5.1): an A4 page at
-    /// 1200 dpi is about 139 M px. The RGB output is 3 bytes per pixel, so the peak allocation is at most
-    /// 3 × 2^28 = 768 MiB, within the 1 GiB per-image target.
-    /// </summary>
-    public const long MaxImagePixels = 1L << 28;
 
     /// <summary>
     /// Tint-transform work per converted image (2 × 10^9 cost units, about one unit per function operation).

@@ -92,7 +92,7 @@ public sealed class ColorLimitsTests
             => Arr(new PdfName("Indexed"), new PdfName(name), new PdfInteger(0), new PdfString(new byte[3], false));
 
         Exception? ex = Bounded.Run(() => PdfColorSpace.Resolve(new PdfName("CS0"), Identity, Raw, Lookup));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxColorSpaceDepth", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]
@@ -171,7 +171,7 @@ public sealed class ColorLimitsTests
         }
 
         Exception? ex = Bounded.Run(() => PdfFunction.Parse(f, Identity, Raw));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxFunctionDepth", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public sealed class ColorLimitsTests
         objects[10] = PsFunction("{ }");
 
         Exception? ex = Bounded.Run(() => PdfFunction.Parse(Ref(0), Resolver(objects), Raw));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxFunctionNodes", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]
@@ -270,7 +270,7 @@ public sealed class ColorLimitsTests
     public void PostScript_DeepBraces_AreRejectedWithoutStackOverflow()
     {
         Exception? ex = Bounded.Run(() => PdfFunction.Parse(PsFunction(new string('{', 200_000)), Identity, Raw));
-        Assert.IsType<PdfSyntaxException>(ex);
+        Assert.Equal("MaxPostScriptBraceDepth", Assert.IsType<PdfLimitExceededException>(ex).LimitName);
     }
 
     [Fact]
@@ -359,5 +359,39 @@ public sealed class ColorLimitsTests
         var data = new byte[4096 * 16];
         Exception? ex = Bounded.Run(() => ColorConverter.ToRgb(data, 4096, 1, 16, 8, cs), seconds: 30);
         Assert.IsType<InvalidDataException>(ex);
+        Assert.Equal("MaxTintWork", Assert.IsType<PdfLimitExceededException>(ex!.InnerException).LimitName);
+    }
+
+    // ---- injected PdfLimits (ADR-0010 phase 2) ----
+
+    [Fact]
+    public void ColorConverter_OverTheInjectedPixelLimit_IsInvalidDataNamingTheLimit()
+    {
+        PdfColorSpace rgb = PdfColorSpace.Resolve(new PdfName("DeviceRGB"), Identity, Raw);
+        var limits = new PdfLimits { MaxImagePixels = 15 };
+
+        var ex = Assert.IsType<InvalidDataException>(Bounded.Run(() => ColorConverter.ToRgb(new byte[48], limits, 4, 4, 3, 8, rgb)));
+        var inner = Assert.IsType<PdfLimitExceededException>(ex.InnerException);
+        Assert.Equal(nameof(PdfLimits.MaxImagePixels), inner.LimitName);
+        Assert.Equal(15, inner.Limit);
+
+        var raster = new RasterImage { Width = 4, Height = 4, Components = 3, Samples = new byte[48] };
+        ex = Assert.IsType<InvalidDataException>(Bounded.Run(() => ColorConverter.ToRgb(raster, limits, rgb)));
+        Assert.Equal(nameof(PdfLimits.MaxImagePixels), Assert.IsType<PdfLimitExceededException>(ex.InnerException).LimitName);
+
+        // The same image within the default limits converts as before.
+        Assert.Equal(48, ColorConverter.ToRgb(new byte[48], 4, 4, 3, 8, rgb).Samples.Length);
+        Assert.Equal(48, ColorConverter.ToRgb(raster, rgb).Samples.Length);
+    }
+
+    [Fact]
+    public void ColorConverter_NullLimits_AreRejected()
+    {
+        PdfColorSpace rgb = PdfColorSpace.Resolve(new PdfName("DeviceRGB"), Identity, Raw);
+        var raster = new RasterImage { Width = 1, Height = 1, Components = 3, Samples = new byte[3] };
+
+        Assert.Throws<ArgumentNullException>(() => ColorConverter.ToRgb(new byte[3], null!, 1, 1, 3, 8, rgb));
+        Assert.Throws<ArgumentNullException>(() => ColorConverter.ToRgb(raster, (PdfLimits)null!, rgb));
+        Assert.Throws<ArgumentNullException>(() => ColorConverter.ToRgb(null!, PdfLimits.Default, 1, 1, 3, 8, rgb));
     }
 }

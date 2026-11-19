@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using ZeroDep.Abstractions;
 using ZeroDep.Filters;
 
 namespace ZeroDep.Color;
@@ -14,7 +15,8 @@ namespace ZeroDep.Color;
 public static class ColorConverter
 {
     /// <summary>
-    /// Normalizes packed sample data (native bit depth, rows byte-aligned) to an RGB/Gray raster.
+    /// Normalizes packed sample data (native bit depth, rows byte-aligned) to an RGB/Gray raster, within the
+    /// default <see cref="PdfLimits"/>.
     /// </summary>
     /// <param name="data">The decoded, still-packed image samples.</param>
     /// <param name="width">Image width in pixels.</param>
@@ -29,6 +31,47 @@ public static class ColorConverter
     /// </exception>
     public static RasterImage ToRgb(
         byte[] data, int width, int height, int components, int bitsPerComponent, PdfColorSpace colorSpace, double[]? decode = null)
+        => ToRgb(data, PdfLimits.Default, width, height, components, bitsPerComponent, colorSpace, decode);
+
+    /// <summary>
+    /// Normalizes packed sample data (native bit depth, rows byte-aligned) to an RGB/Gray raster, within
+    /// <paramref name="limits"/>.
+    /// </summary>
+    /// <param name="data">The decoded, still-packed image samples.</param>
+    /// <param name="limits">The limits to apply; the image may have at most <see cref="PdfLimits.MaxImagePixels"/> pixels.</param>
+    /// <param name="width">Image width in pixels.</param>
+    /// <param name="height">Image height in pixels.</param>
+    /// <param name="components">Components per pixel (must match the colour space, except 16-bit reductions).</param>
+    /// <param name="bitsPerComponent">Bits per component: 1, 2, 4, 8, or 16.</param>
+    /// <param name="colorSpace">The resolved colour space.</param>
+    /// <param name="decode">The image's <c>/Decode</c> array, or null for the colour space default.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/>, <paramref name="limits"/> or <paramref name="colorSpace"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The image has more than 32 components or uses a bit depth above 16; or it exceeds the pixel limit or
+    /// the fixed tint-work limit, in which case the inner exception is a <see cref="PdfLimitExceededException"/>
+    /// naming the limit.
+    /// </exception>
+    public static RasterImage ToRgb(
+        byte[] data, PdfLimits limits, int width, int height, int components, int bitsPerComponent, PdfColorSpace colorSpace, double[]? decode = null)
+    {
+        if (limits is null)
+        {
+            throw new ArgumentNullException(nameof(limits));
+        }
+
+        try
+        {
+            return ToRgbCore(data, limits, width, height, components, bitsPerComponent, colorSpace, decode);
+        }
+        catch (PdfLimitExceededException ex)
+        {
+            // The documented type of this public method stays InvalidDataException; the breach rides along.
+            throw new InvalidDataException(ex.Message, ex);
+        }
+    }
+
+    private static RasterImage ToRgbCore(
+        byte[] data, PdfLimits limits, int width, int height, int components, int bitsPerComponent, PdfColorSpace colorSpace, double[]? decode)
     {
         if (data is null)
         {
@@ -47,9 +90,12 @@ public static class ColorConverter
 
         // Bound the work and the output allocation before allocating (ADR-0010 §5.2-4).
         long pixels = (long)width * height;
-        if (pixels > Limits.MaxImagePixels)
+        if (pixels > limits.MaxImagePixels)
         {
-            throw new InvalidDataException($"Image of {width}x{height} pixels exceeds the limit of {Limits.MaxImagePixels} pixels.");
+            throw new PdfLimitExceededException(
+                nameof(PdfLimits.MaxImagePixels),
+                limits.MaxImagePixels,
+                $"Image of {width}x{height} pixels exceeds the limit of {limits.MaxImagePixels} pixels.");
         }
 
         if (components > Limits.MaxComponents || colorSpace.ComponentCount > Limits.MaxComponents)
@@ -126,7 +172,10 @@ public static class ColorConverter
                         tintWork += tintCost;
                         if (tintWork > Limits.MaxTintWork)
                         {
-                            throw new InvalidDataException($"Image tint conversion exceeds the work limit of {Limits.MaxTintWork}.");
+                            throw new PdfLimitExceededException(
+                                nameof(Limits.MaxTintWork),
+                                Limits.MaxTintWork,
+                                $"Image tint conversion exceeds the work limit of {Limits.MaxTintWork}.");
                         }
                     }
 
@@ -154,14 +203,32 @@ public static class ColorConverter
     /// <param name="decoded">The decoded 8-bit raster.</param>
     /// <param name="colorSpace">The resolved colour space.</param>
     /// <param name="decode">The image's <c>/Decode</c> array, or null for the colour space default.</param>
+    /// <remarks>Uses the default <see cref="PdfLimits"/>.</remarks>
     public static RasterImage ToRgb(RasterImage decoded, PdfColorSpace colorSpace, double[]? decode = null)
+        => ToRgb(decoded, PdfLimits.Default, colorSpace, decode);
+
+    /// <summary>
+    /// Normalizes an already-decoded 8-bit raster (e.g. a codec's output) through a colour space, within
+    /// <paramref name="limits"/>. The raster's <see cref="RasterImage.Components"/> are treated as raw colour
+    /// components.
+    /// </summary>
+    /// <param name="decoded">The decoded 8-bit raster.</param>
+    /// <param name="limits">The limits to apply; the image may have at most <see cref="PdfLimits.MaxImagePixels"/> pixels.</param>
+    /// <param name="colorSpace">The resolved colour space.</param>
+    /// <param name="decode">The image's <c>/Decode</c> array, or null for the colour space default.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="decoded"/>, <paramref name="limits"/> or <paramref name="colorSpace"/> is null.</exception>
+    /// <exception cref="InvalidDataException">
+    /// The image exceeds a limit (the inner exception is a <see cref="PdfLimitExceededException"/> naming it), or
+    /// has more than 32 components.
+    /// </exception>
+    public static RasterImage ToRgb(RasterImage decoded, PdfLimits limits, PdfColorSpace colorSpace, double[]? decode = null)
     {
         if (decoded is null)
         {
             throw new ArgumentNullException(nameof(decoded));
         }
 
-        return ToRgb(decoded.Samples, decoded.Width, decoded.Height, decoded.Components, 8, colorSpace, decode);
+        return ToRgb(decoded.Samples, limits, decoded.Width, decoded.Height, decoded.Components, 8, colorSpace, decode);
     }
 
     private static int ReadBits(byte[] data, long bitPos, int n)

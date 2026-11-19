@@ -340,7 +340,10 @@ internal sealed class PostScriptFunction : PdfFunction
     {
         if (depth > Limits.MaxPostScriptBraceDepth)
         {
-            throw new PdfSyntaxException($"PostScript function braces nest deeper than {Limits.MaxPostScriptBraceDepth}.");
+            throw new PdfLimitExceededException(
+                nameof(Limits.MaxPostScriptBraceDepth),
+                Limits.MaxPostScriptBraceDepth,
+                $"PostScript function braces nest deeper than {Limits.MaxPostScriptBraceDepth}.");
         }
 
         var tokens = new List<PsToken>();
