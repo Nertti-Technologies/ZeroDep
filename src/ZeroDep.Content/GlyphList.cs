@@ -5,7 +5,8 @@ namespace ZeroDep.Content;
 
 /// <summary>
 /// Maps PostScript glyph names to Unicode for <c>/Differences</c> encodings (a focused Adobe Glyph
-/// List subset plus the <c>uniXXXX</c> / <c>uXXXXXX</c> conventions). ISO 32000-2 §9.6.6, §D.
+/// List subset plus the <c>uniXXXX</c> / <c>uXXXXXX</c> conventions). ISO 32000-2 §9.6.6, §D. The list is
+/// BSD-3-Clause; see THIRD-PARTY-NOTICES.txt.
 /// </summary>
 internal static class GlyphList
 {

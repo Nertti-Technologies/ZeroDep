@@ -1,0 +1,8 @@
+Component: Adobe Glyph List (subset of glyph name to Unicode mappings)
+Licence: BSD-3-Clause
+Copyright: Copyright 2002-2019 Adobe (http://www.adobe.com/).
+Source: https://github.com/adobe-type-tools/agl-aglfn/blob/4036a9ca80a62f64f9de4f7321a9a045ad0ecfd6/glyphlist.txt
+Licence text: https://github.com/adobe-type-tools/agl-aglfn/blob/4036a9ca80a62f64f9de4f7321a9a045ad0ecfd6/LICENSE.md
+Retrieved: 2026-11-19
+Used in: src/ZeroDep.Content/GlyphList.cs, shipped in ZeroDep.Content
+Changes: A subset of the mappings is reproduced as a C# table.

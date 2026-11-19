@@ -11,7 +11,7 @@ namespace ZeroDep.Filters.Jpx;
 /// </summary>
 internal static class JpxTier1
 {
-    // Context labels (matching the OpenJPEG/T.800 grouping): ZC 0-8, SC 9-13, MR 14-16, RUN 17, UNI 18.
+    // Context labels (the T.800 grouping used by the reference decoder; see THIRD-PARTY-NOTICES.txt): ZC 0-8, SC 9-13, MR 14-16, RUN 17, UNI 18.
     private const int CtxRun = 17;
     private const int CtxUni = 18;
     private const int NumContexts = 19;

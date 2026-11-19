@@ -3,9 +3,9 @@ namespace ZeroDep.Filters.Jpx;
 /// <summary>
 /// Bit reader for JPEG 2000 packet headers (ITU-T T.800 §B.10.1). Bits are read MSB-first with the
 /// codestream bit-unstuffing rule: the byte following a <c>0xFF</c> contributes only its 7 low bits
-/// (its MSB is a stuffed zero). Mirrors the OpenJPEG <c>bio</c> read path. A fresh instance is created
-/// for each packet header; <see cref="ByteAlign"/> then yields the byte offset where the packet body
-/// (code-block data) begins.
+/// (its MSB is a stuffed zero). Follows a reference decoder's read path (BSD-2-Clause; see
+/// THIRD-PARTY-NOTICES.txt). A fresh instance is created for each packet header; <see cref="ByteAlign"/>
+/// then yields the byte offset where the packet body (code-block data) begins.
 /// </summary>
 internal sealed class JpxBitReader
 {

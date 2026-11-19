@@ -23,7 +23,9 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
+          # SDK from global.json; the 10.0 runtime is needed to run the net10.0 test target.
           global-json-file: global.json
+          dotnet-version: 10.0.x
 
       - name: Derive version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
