@@ -4,7 +4,8 @@ name: release
 #   git tag v1.0.0 && git push origin v1.0.0
 #
 # One-time setup on nuget.org (Account → Trusted Publishing):
-#   Repository Owner: Nerttiyana-Technologies
+#   Repository Owner: Nertti-Technologies   (the GitHub org; the packages belong to the
+#                     Nerttiyana-Technologies nuget.org organisation)
 #   Repository:       ZeroDep
 #   Workflow File:    release.yml
 #   Environment:      (leave empty)
