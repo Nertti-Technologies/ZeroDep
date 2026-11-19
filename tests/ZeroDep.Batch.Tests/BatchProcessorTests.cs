@@ -82,6 +82,104 @@ public sealed class BatchProcessorTests : IDisposable
         Assert.Equal(1, second.Statistics.Corpus.Total);
     }
 
+    [Fact]
+    public async Task UnreadableFileIsRejectedWithoutAbortingTheRun()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return; // Unix file modes only; Windows has no mode-000 equivalent
+        }
+
+        for (int i = 0; i < 3; i++)
+        {
+            File.WriteAllBytes(Path.Combine(_input, $"doc{i}.pdf"), TextPdf("BT /F1 12 Tf 100 700 Td (Doc) Tj ET"));
+        }
+
+        string locked = Path.Combine(_input, "doc1.pdf");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+        try
+        {
+            if (CanOpen(locked))
+            {
+                return; // running with privileges that ignore file modes (e.g. root)
+            }
+
+            var options = new BatchOptions { InputDirectory = _input, OutputDirectory = _output, MaxConcurrency = 2 };
+            BatchSummary summary = await new BatchProcessor().RunAsync(options);
+
+            Assert.Equal(3, summary.Total);
+            Assert.Equal(3, summary.ProcessedThisRun);
+            Assert.Equal(1, summary.Rejected);
+            Assert.Contains(summary.Statistics.Rejections, r => r.Reason == "MalformedObject" && r.Count == 1);
+            Assert.True(File.Exists(summary.AggregatePath));
+            Assert.Equal(3, File.ReadAllLines(Path.Combine(_output, "ledger.tsv")).Length);
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
+    [Fact]
+    public async Task PerFileJsonWriteFailureIsRejectedWithoutAbortingTheRun()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return; // Unix file modes only
+        }
+
+        File.WriteAllBytes(Path.Combine(_input, "doc1.pdf"), TextPdf("BT /F1 12 Tf 100 700 Td (Doc) Tj ET"));
+        string perFile = Path.Combine(_output, "perfile");
+        Directory.CreateDirectory(perFile);
+        File.SetUnixFileMode(perFile, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            if (CanCreateIn(perFile))
+            {
+                return; // running with privileges that ignore file modes (e.g. root)
+            }
+
+            var options = new BatchOptions { InputDirectory = _input, OutputDirectory = _output };
+            BatchSummary summary = await new BatchProcessor().RunAsync(options);
+
+            Assert.Equal(1, summary.Total);
+            Assert.Equal(1, summary.Rejected);
+            Assert.True(File.Exists(summary.AggregatePath));
+        }
+        finally
+        {
+            File.SetUnixFileMode(perFile, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static bool CanOpen(string path)
+    {
+        try
+        {
+            using FileStream stream = File.OpenRead(path);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool CanCreateIn(string directory)
+    {
+        string probe = Path.Combine(directory, "probe");
+        try
+        {
+            File.WriteAllText(probe, string.Empty);
+            File.Delete(probe);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     private static byte[] TextPdf(string content)
     {
         var ms = new MemoryStream();
