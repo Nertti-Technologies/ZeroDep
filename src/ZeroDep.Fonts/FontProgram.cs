@@ -54,6 +54,7 @@ public sealed class FontProgram
 
     /// <summary>Sniffs the program kind from the leading bytes and parses it.</summary>
     /// <param name="data">The decoded font-program bytes.</param>
+    /// <exception cref="NotSupportedException">The program is of an unsupported kind or malformed.</exception>
     public static FontProgram Load(byte[] data)
     {
         if (data is null)
@@ -61,21 +62,39 @@ public sealed class FontProgram
             throw new ArgumentNullException(nameof(data));
         }
 
-        FontProgramKind kind = Detect(data);
-        switch (kind)
+        return FontFault.Guard(() =>
         {
-            case FontProgramKind.Type1:
-                return new FontProgram(null, null, Type1Font.Load(data), kind);
-            case FontProgramKind.Cff:
-                return new FontProgram(null, CffFont.Load(data), null, kind);
-            default:
-                return new FontProgram(TrueTypeFont.Load(data), null, null, kind);
+            FontProgramKind kind = Detect(data);
+            switch (kind)
+            {
+                case FontProgramKind.Type1:
+                    return new FontProgram(null, null, Type1Font.Load(data), kind);
+                case FontProgramKind.Cff:
+                    return new FontProgram(null, CffFont.Load(data), null, kind);
+                default:
+                    return new FontProgram(TrueTypeFont.Load(data), null, null, kind);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Returns the outline (font units) for a glyph id, or <see cref="GlyphOutline.Empty"/> when the glyph is
+    /// absent, malformed, or over the per-glyph work limit.
+    /// </summary>
+    /// <param name="glyphId">The glyph id.</param>
+    public GlyphOutline GetGlyph(int glyphId)
+    {
+        try
+        {
+            return GetGlyphCore(glyphId);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return GlyphOutline.Empty;
         }
     }
 
-    /// <summary>Returns the outline (font units) for a glyph id, or <see cref="GlyphOutline.Empty"/>.</summary>
-    /// <param name="glyphId">The glyph id.</param>
-    public GlyphOutline GetGlyph(int glyphId)
+    private GlyphOutline GetGlyphCore(int glyphId)
     {
         if (_ttf is not null)
         {
@@ -95,7 +114,10 @@ public sealed class FontProgram
         return GlyphOutline.Empty;
     }
 
-    /// <summary>Returns the outline for a named glyph (Type 1), or <see cref="GlyphOutline.Empty"/>.</summary>
+    /// <summary>
+    /// Returns the outline for a named glyph (Type 1), or <see cref="GlyphOutline.Empty"/> when absent,
+    /// malformed, or over the per-glyph work limit.
+    /// </summary>
     /// <param name="name">The glyph name.</param>
     public GlyphOutline GetGlyphByName(string name)
         => _t1 is not null ? _t1.GetGlyph(name) : GlyphOutline.Empty;
@@ -105,17 +127,25 @@ public sealed class FontProgram
     /// programs, returns the linearly scaled (unhinted) outline at that ppem.
     /// </summary>
     /// <param name="glyphId">The glyph id.</param>
-    /// <param name="pixelsPerEm">The target em size in pixels.</param>
+    /// <param name="pixelsPerEm">The target em size in pixels (TrueType ppem is 16-bit; larger values are clamped).</param>
     public GlyphOutline GetHintedGlyph(int glyphId, int pixelsPerEm)
     {
-        if (_ttf is not null)
+        pixelsPerEm = Math.Min(pixelsPerEm, ushort.MaxValue);
+        try
         {
-            return _ttf.GetHintedGlyph(glyphId, pixelsPerEm);
-        }
+            if (_ttf is not null)
+            {
+                return _ttf.GetHintedGlyph(glyphId, pixelsPerEm);
+            }
 
-        // No native hinting: scale the outline to 26.6 device pixels for a uniform contract.
-        GlyphOutline outline = GetGlyph(glyphId);
-        return ScaleToDevice(outline, pixelsPerEm);
+            // No native hinting: scale the outline to 26.6 device pixels for a uniform contract.
+            GlyphOutline outline = GetGlyph(glyphId);
+            return ScaleToDevice(outline, pixelsPerEm);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return GlyphOutline.Empty;
+        }
     }
 
     /// <summary>Maps a Unicode code point to a glyph id via the program's cmap (TrueType), or 0.</summary>
@@ -159,7 +189,8 @@ public sealed class FontProgram
             contours.Add(new GlyphContour(c.StartX * s, c.StartY * s, segs));
         }
 
-        return new GlyphOutline(contours, (int)Math.Round((double)outline.AdvanceWidth * ppem * 64 / UnitsPerEm));
+        double advance = Math.Round((double)outline.AdvanceWidth * ppem * 64 / UnitsPerEm);
+        return new GlyphOutline(contours, advance >= int.MaxValue ? int.MaxValue : (advance <= int.MinValue ? int.MinValue : (int)advance));
     }
 
     private static FontProgramKind Detect(byte[] data)

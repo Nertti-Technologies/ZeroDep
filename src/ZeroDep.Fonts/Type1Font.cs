@@ -39,6 +39,7 @@ public sealed class Type1Font
     public bool HasGlyph(string name) => _charstrings.ContainsKey(name);
 
     /// <summary>Parses a Type 1 font program from raw <c>FontFile</c> bytes.</summary>
+    /// <exception cref="NotSupportedException">The program is not a Type 1 font or is malformed.</exception>
     public static Type1Font Load(byte[] data)
     {
         if (data is null)
@@ -46,6 +47,11 @@ public sealed class Type1Font
             throw new ArgumentNullException(nameof(data));
         }
 
+        return FontFault.Guard(() => LoadCore(data));
+    }
+
+    private static Type1Font LoadCore(byte[] data)
+    {
         int eexec = IndexOf(data, "eexec", 0);
         if (eexec < 0)
         {
@@ -75,7 +81,10 @@ public sealed class Type1Font
         return new Type1Font(unitsPerEm, cs, subrs);
     }
 
-    /// <summary>Returns the outline for the named glyph, or <see cref="GlyphOutline.Empty"/> if absent/empty.</summary>
+    /// <summary>
+    /// Returns the outline for the named glyph, or <see cref="GlyphOutline.Empty"/> if absent, empty,
+    /// malformed, or over the per-glyph work limit.
+    /// </summary>
     public GlyphOutline GetGlyph(string name)
     {
         if (name is null || !_charstrings.ContainsKey(name))
@@ -83,10 +92,19 @@ public sealed class Type1Font
             return GlyphOutline.Empty;
         }
 
-        var interp = new Type1Interpreter(this);
-        interp.Run(_charstrings[name]);
-        IReadOnlyList<GlyphContour> contours = interp.Builder.Build();
-        return contours.Count == 0 ? GlyphOutline.Empty : new GlyphOutline(contours, (int)Math.Round(interp.Width));
+        try
+        {
+            var interp = new Type1Interpreter(this);
+            interp.Run(_charstrings[name]);
+            IReadOnlyList<GlyphContour> contours = interp.Builder.Build();
+            double width = Math.Round(interp.Width);
+            int advance = width >= int.MaxValue ? int.MaxValue : (width <= int.MinValue ? int.MinValue : (int)width);
+            return contours.Count == 0 ? GlyphOutline.Empty : new GlyphOutline(contours, advance);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            return GlyphOutline.Empty;
+        }
     }
 
     private byte[]? Subr(int i) => i >= 0 && i < _subrs.Length ? _subrs[i] : null;
@@ -212,7 +230,7 @@ public sealed class Type1Font
         string[] parts = body.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length >= 1 && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double a) && a > 0)
         {
-            return (int)Math.Round(1.0 / a);
+            return FontFault.SanitizeUnitsPerEm(Math.Round(1.0 / a));
         }
 
         return 1000;
@@ -265,7 +283,14 @@ public sealed class Type1Font
                 break;
             }
 
-            if (idx >= 0 && idx < count && i + len <= priv.Length)
+            // A negative or overlong length is skipped; the cursor only moves forward (no rewind).
+            if (len < 0 || len > priv.Length - i)
+            {
+                found++;
+                continue;
+            }
+
+            if (idx >= 0 && idx < count)
             {
                 subrs[idx] = DecryptCharString(priv, i, len, lenIV);
             }
@@ -336,7 +361,15 @@ public sealed class Type1Font
                 continue;
             }
 
-            if (j + len <= priv.Length && name.Length > 0)
+            // A negative or overlong length is skipped. The cursor must always advance: a negative length
+            // would otherwise move it back to the same entry forever.
+            if (len < 0 || len > priv.Length - j)
+            {
+                i = j;
+                continue;
+            }
+
+            if (name.Length > 0)
             {
                 map[name] = DecryptCharString(priv, j, len, lenIV);
             }
@@ -391,7 +424,7 @@ public sealed class Type1Font
         int digits = 0;
         while (i < data.Length && data[i] >= '0' && data[i] <= '9')
         {
-            v = (v * 10) + (data[i] - '0');
+            v = Math.Min((v * 10) + (data[i] - '0'), (long)int.MaxValue + 1); // saturate, never overflow
             i++;
             digits++;
         }
@@ -402,7 +435,7 @@ public sealed class Type1Font
             return false;
         }
 
-        value = (int)(neg ? -v : v);
+        value = neg ? (int)Math.Max(-v, int.MinValue) : (int)Math.Min(v, int.MaxValue);
         return true;
     }
 
@@ -450,6 +483,7 @@ public sealed class Type1Font
     private sealed class Type1Interpreter
     {
         private readonly Type1Font _font;
+        private readonly GlyphWork _work = new GlyphWork();
         private readonly List<double> _st = new List<double>();
         private readonly List<double> _ps = new List<double>();
         private readonly List<double> _flex = new List<double>(); // pairs x,y
@@ -458,6 +492,7 @@ public sealed class Type1Font
         private double _sbx;
         private bool _inFlex;
         private bool _done;
+        private bool _inSeac;
         private int _depth;
 
         public Type1Interpreter(Type1Font font) => _font = font;
@@ -470,15 +505,19 @@ public sealed class Type1Font
 
         private void Exec(byte[] cs, double offsetX, double offsetY)
         {
-            if (_depth++ > 30 || cs is null)
+            if (_depth++ > Limits.MaxType1SubrDepth || cs is null)
             {
                 _depth--;
                 return;
             }
 
+            // Every call and every byte is charged to the glyph's work budget, shared across subroutines
+            // and seac components.
+            _work.Charge(1);
             int i = 0;
             while (i < cs.Length && !_done)
             {
+                _work.Charge(1);
                 int b = cs[i++];
                 if (b >= 32)
                 {
@@ -548,7 +587,8 @@ public sealed class Type1Font
                         _st.Clear();
                         break;
                     case 12:
-                        ExecEscape(cs[i++], offsetX, offsetY);
+                        ExecEscape(i < cs.Length ? cs[i] : -1, offsetX, offsetY);
+                        i++;
                         break;
                     default:
                         _st.Clear();
@@ -606,7 +646,9 @@ public sealed class Type1Font
 
         private void Seac(double offsetX, double offsetY)
         {
-            if (_st.Count < 5)
+            // seac components are plain glyphs: a seac inside one (or a component that is itself an
+            // accented composite) may not nest, per the Type 1 format.
+            if (_st.Count < 5 || _inSeac)
             {
                 _st.Clear();
                 return;
@@ -615,9 +657,10 @@ public sealed class Type1Font
             double asb = _st[0];
             double adx = _st[1];
             double ady = _st[2];
-            int bchar = (int)_st[3];
-            int achar = (int)_st[4];
+            int bchar = ToInt(_st[3]);
+            int achar = ToInt(_st[4]);
             _st.Clear();
+            _inSeac = true;
 
             string? baseName = StandardEncoding.Name(bchar);
             string? accentName = StandardEncoding.Name(achar);
@@ -633,6 +676,7 @@ public sealed class Type1Font
                 Exec(accCs, dx, ady + offsetY);
             }
 
+            _inSeac = false;
             _done = true;
         }
 
@@ -643,7 +687,7 @@ public sealed class Type1Font
                 return;
             }
 
-            int idx = (int)PopSt();
+            int idx = ToInt(PopSt());
             byte[]? sub = _font.Subr(idx);
             if (sub is { Length: > 0 })
             {
@@ -659,8 +703,10 @@ public sealed class Type1Font
                 return;
             }
 
-            int othersubr = (int)PopSt();
-            int n = (int)PopSt();
+            int othersubr = ToInt(PopSt());
+
+            // The argument count comes from the charstring: never more than the stack holds, never negative.
+            int n = Math.Max(0, Math.Min(ToInt(PopSt()), _st.Count));
             var args = new List<double>(n);
             for (int k = 0; k < n && _st.Count > 0; k++)
             {
@@ -776,6 +822,8 @@ public sealed class Type1Font
 
         private static double ReadNumber(byte[] cs, ref int i, int b)
         {
+            int p = i;
+            int At(int k) => p + k < cs.Length ? cs[p + k] : 0; // a truncated number reads as zero bytes
             if (b <= 246)
             {
                 return b - 139;
@@ -783,18 +831,24 @@ public sealed class Type1Font
 
             if (b <= 250)
             {
-                return ((b - 247) * 256) + cs[i++] + 108;
+                i++;
+                return ((b - 247) * 256) + At(0) + 108;
             }
 
             if (b <= 254)
             {
-                return -((b - 251) * 256) - cs[i++] - 108;
+                i++;
+                return -((b - 251) * 256) - At(0) - 108;
             }
 
             // 255: 32-bit signed integer (Type 1 — not 16.16 fixed).
-            int v = (cs[i] << 24) | (cs[i + 1] << 16) | (cs[i + 2] << 8) | cs[i + 3];
+            int v = (At(0) << 24) | (At(1) << 16) | (At(2) << 8) | At(3);
             i += 4;
             return v;
         }
+
+        // Charstring numbers are doubles after div; NaN or out-of-range values must not reach an int cast.
+        private static int ToInt(double v)
+            => double.IsNaN(v) ? 0 : (v >= int.MaxValue ? int.MaxValue : (v <= int.MinValue ? int.MinValue : (int)v));
     }
 }
