@@ -26,6 +26,8 @@ public sealed class AggregatorAndLedgerTests
             Threshold = 150,
             BelowThresholdCount = 3,
             EffectiveDpis = new double[] { 72, 200, 600 },
+            PasswordSupplied = true,
+            EngineVersion = "2.1.1",
         };
 
         FileOutcome? parsed = FileOutcome.FromLedgerLine(outcome.ToLedgerLine());
@@ -39,6 +41,55 @@ public sealed class AggregatorAndLedgerTests
         Assert.Equal(EncryptionAlgorithm.Aes256, parsed.EncryptionAlgorithm);
         Assert.Equal(3, parsed.BelowThresholdCount);
         Assert.Equal(new double[] { 72, 200, 600 }, parsed.EffectiveDpis);
+        Assert.True(parsed.PasswordSupplied);
+        Assert.Equal("2.1.1", parsed.EngineVersion);
+    }
+
+    [Fact]
+    public void LedgerLineInTheEarlierFormatParsesButNeverMatchesARun()
+    {
+        string oldLine = string.Join("\t", new[]
+        {
+            "abc123", "def456", "Processed", "DigitalText", "1", "0", "0", "None", "0", "0", "None", "150", "0", string.Empty,
+        });
+
+        FileOutcome? parsed = FileOutcome.FromLedgerLine(oldLine);
+
+        Assert.NotNull(parsed);
+        Assert.Equal(string.Empty, parsed!.EngineVersion);
+        Assert.False(parsed.MatchesRun("def456", 150, passwordSupplied: false, engineVersion: "2.1.1"));
+    }
+
+    [Theory]
+    [InlineData("other", 150, false, "2.1.1")]
+    [InlineData("def456", 300, false, "2.1.1")]
+    [InlineData("def456", 150, true, "2.1.1")]
+    [InlineData("def456", 150, false, "2.2.0")]
+    public void OutcomeMatchesOnlyTheSameInputAndRunDetails(string hash, int threshold, bool password, string engine)
+    {
+        var outcome = new FileOutcome { InputHash = "def456", Threshold = 150, PasswordSupplied = false, EngineVersion = "2.1.1" };
+
+        Assert.True(outcome.MatchesRun("def456", 150, passwordSupplied: false, engineVersion: "2.1.1"));
+        Assert.False(outcome.MatchesRun(hash, threshold, password, engine));
+    }
+
+    [Fact]
+    public void ReportedThresholdIsTheRunThresholdWhateverTheOutcomeOrder()
+    {
+        var outcomes = new List<FileOutcome>
+        {
+            Processed(DocumentCategory.DigitalText, ocr: false, dpis: new double[] { 300 }),
+            Processed(DocumentCategory.ScannedImageOnly, ocr: false, dpis: new double[] { 72 }),
+        };
+        outcomes[0].Threshold = 100;
+        outcomes[1].Threshold = 200;
+
+        AggregateStatistics forward = Aggregator.Build(outcomes, ClassificationThresholds.Default, 150);
+        outcomes.Reverse();
+        AggregateStatistics reversed = Aggregator.Build(outcomes, ClassificationThresholds.Default, 150);
+
+        Assert.Equal(150, forward.Dpi.Threshold);
+        Assert.Equal(150, reversed.Dpi.Threshold);
     }
 
     [Fact]
@@ -52,7 +103,7 @@ public sealed class AggregatorAndLedgerTests
             Rejected(RejectionReason.TruncatedStream),
         };
 
-        AggregateStatistics stats = Aggregator.Build(outcomes, ClassificationThresholds.Default);
+        AggregateStatistics stats = Aggregator.Build(outcomes, ClassificationThresholds.Default, 150);
 
         Assert.Equal(4, stats.Corpus.Total);
         Assert.Equal(3, stats.Corpus.Processed);
@@ -77,9 +128,9 @@ public sealed class AggregatorAndLedgerTests
             Rejected(RejectionReason.MissingHeader),
         };
 
-        AggregateStatistics forward = Aggregator.Build(outcomes, ClassificationThresholds.Default);
+        AggregateStatistics forward = Aggregator.Build(outcomes, ClassificationThresholds.Default, 150);
         outcomes.Reverse();
-        AggregateStatistics reversed = Aggregator.Build(outcomes, ClassificationThresholds.Default);
+        AggregateStatistics reversed = Aggregator.Build(outcomes, ClassificationThresholds.Default, 150);
 
         // Compare deterministic aggregates (excluding the wall-clock generatedUtc timestamp).
         Assert.Equal(forward.Corpus.Total, reversed.Corpus.Total);

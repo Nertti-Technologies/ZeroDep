@@ -13,7 +13,11 @@ namespace ZeroDep.Batch;
 /// </summary>
 internal static class Aggregator
 {
-    public static AggregateStatistics Build(IReadOnlyList<FileOutcome> outcomes, ClassificationThresholds thresholds)
+    /// <summary>
+    /// Builds the statistics. The reported DPI threshold is the run's own <paramref name="dpiThreshold"/>,
+    /// never one taken from an individual outcome, so the result does not depend on outcome order.
+    /// </summary>
+    public static AggregateStatistics Build(IReadOnlyList<FileOutcome> outcomes, ClassificationThresholds thresholds, int dpiThreshold)
     {
         int total = outcomes.Count;
         int processed = 0;
@@ -24,7 +28,6 @@ internal static class Aggregator
         int formFiles = 0;
         int imagesMeasured = 0;
         int belowThreshold = 0;
-        int chosenThreshold = 0;
 
         var categoryCounts = new Dictionary<DocumentCategory, int>();
         var algorithmCounts = new Dictionary<EncryptionAlgorithm, int>();
@@ -83,16 +86,6 @@ internal static class Aggregator
             {
                 dpis.Add(dpi);
             }
-
-            if (outcome.Threshold > 0)
-            {
-                chosenThreshold = outcome.Threshold;
-            }
-        }
-
-        if (chosenThreshold == 0)
-        {
-            chosenThreshold = ClassificationThresholdsDefaultThreshold;
         }
 
         dpis.Sort();
@@ -114,7 +107,7 @@ internal static class Aggregator
             {
                 ImagesMeasured = imagesMeasured,
                 BelowThresholdPercent = Percent(belowThreshold, imagesMeasured),
-                Threshold = chosenThreshold,
+                Threshold = dpiThreshold,
                 Min = dpis.Count > 0 ? Round(dpis[0]) : 0,
                 Median = Percentile(dpis, 0.50),
                 P95 = Percentile(dpis, 0.95),
@@ -130,8 +123,6 @@ internal static class Aggregator
             Rejections = BuildRejections(rejectionCounts),
         };
     }
-
-    private const int ClassificationThresholdsDefaultThreshold = 150;
 
     private static void Increment<TKey>(Dictionary<TKey, int> map, TKey key)
         where TKey : notnull

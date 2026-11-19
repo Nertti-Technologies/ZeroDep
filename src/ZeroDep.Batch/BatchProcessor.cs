@@ -49,6 +49,9 @@ public sealed class BatchProcessor
         string[] files = Directory.GetFiles(options.InputDirectory, "*.pdf", SearchOption.AllDirectories);
         Array.Sort(files, StringComparer.Ordinal);
 
+        bool passwordSupplied = !string.IsNullOrEmpty(options.Password);
+        string engineVersion = ZeroDepInfo.Version;
+
         var outcomes = new ConcurrentBag<FileOutcome>();
         int[] counters = new int[2]; // [0] = processed this run, [1] = skipped
 
@@ -65,7 +68,7 @@ public sealed class BatchProcessor
             if (contentHash != null
                 && options.Resume
                 && priorLedger.TryGetValue(id, out FileOutcome? prior)
-                && prior.InputHash == contentHash)
+                && prior.MatchesRun(contentHash, options.DpiThreshold, passwordSupplied, engineVersion))
             {
                 outcomes.Add(prior);
                 Interlocked.Increment(ref counters[1]);
@@ -74,7 +77,7 @@ public sealed class BatchProcessor
 
             // A file that cannot be read (locked, deleted, no permission) is isolated like any other bad file.
             FileOutcome outcome = contentHash is null
-                ? RejectedOutcome(id, string.Empty)
+                ? RejectedOutcome(id, string.Empty, options)
                 : ProcessFile(path, id, contentHash, options, perFileRoot);
             outcomes.Add(outcome);
             Interlocked.Increment(ref counters[0]);
@@ -124,7 +127,7 @@ public sealed class BatchProcessor
 #endif
 
         List<FileOutcome> all = outcomes.ToList();
-        AggregateStatistics statistics = Aggregator.Build(all, options.Thresholds);
+        AggregateStatistics statistics = Aggregator.Build(all, options.Thresholds, options.DpiThreshold);
         string aggregatePath = Path.Combine(options.OutputDirectory, AggregateFileName);
         File.WriteAllText(aggregatePath, AggregateStatisticsJson.Write(statistics, indent: true));
 
@@ -151,7 +154,7 @@ public sealed class BatchProcessor
         catch (Exception)
         {
             // An unexpected failure is isolated to this file: record a rejection, never abort the run.
-            return RejectedOutcome(id, contentHash);
+            return RejectedOutcome(id, contentHash, options);
         }
 
         DocumentCategory category = DocumentClassifier.Classify(analysis, options.Thresholds);
@@ -165,7 +168,7 @@ public sealed class BatchProcessor
             catch (Exception)
             {
                 // A per-file output that cannot be written is isolated to this file, like a failed analysis.
-                return RejectedOutcome(id, contentHash);
+                return RejectedOutcome(id, contentHash, options);
             }
         }
 
@@ -206,6 +209,8 @@ public sealed class BatchProcessor
             Threshold = options.DpiThreshold,
             BelowThresholdCount = below,
             EffectiveDpis = dpis,
+            PasswordSupplied = !string.IsNullOrEmpty(options.Password),
+            EngineVersion = ZeroDepInfo.Version,
         };
     }
 
@@ -228,7 +233,7 @@ public sealed class BatchProcessor
 
     // The outcome recorded for a file that could not be read, analyzed or written. I/O failures map to
     // MalformedObject, the same reason an unexpected analysis failure is recorded under.
-    private static FileOutcome RejectedOutcome(string id, string contentHash)
+    private static FileOutcome RejectedOutcome(string id, string contentHash, BatchOptions options)
         => new FileOutcome
         {
             Id = id,
@@ -236,6 +241,9 @@ public sealed class BatchProcessor
             Status = DocumentStatus.Rejected,
             Category = DocumentCategory.Rejected,
             Rejection = RejectionReason.MalformedObject,
+            Threshold = options.DpiThreshold,
+            PasswordSupplied = !string.IsNullOrEmpty(options.Password),
+            EngineVersion = ZeroDepInfo.Version,
         };
 
     private static Dictionary<string, FileOutcome> LoadLedger(string ledgerPath)

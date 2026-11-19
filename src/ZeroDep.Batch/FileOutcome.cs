@@ -15,7 +15,9 @@ internal sealed class FileOutcome
 {
     private const char FieldSeparator = '\t';
     private const char DpiSeparator = ',';
-    private const int FieldCount = 14;
+    private const int FieldCount = 14;          // the earliest ledger format; later fields are optional
+    private const int PasswordSuppliedField = 14;
+    private const int EngineVersionField = 15;
 
     public string Id { get; set; } = string.Empty;
 
@@ -45,6 +47,24 @@ internal sealed class FileOutcome
 
     public IReadOnlyList<double> EffectiveDpis { get; set; } = Array.Empty<double>();
 
+    /// <summary>Whether the run that produced this outcome supplied a password (never the password itself).</summary>
+    public bool PasswordSupplied { get; set; }
+
+    /// <summary>The engine version that produced this outcome; empty for ledger lines written before it was recorded.</summary>
+    public string EngineVersion { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether this recorded outcome can be reused for a run over the same bytes with the same DPI threshold,
+    /// password presence and engine version. A line that lacks any of these never matches.
+    /// </summary>
+    public bool MatchesRun(string inputHash, int dpiThreshold, bool passwordSupplied, string engineVersion)
+        => InputHash.Length > 0
+            && string.Equals(InputHash, inputHash, StringComparison.Ordinal)
+            && Threshold == dpiThreshold
+            && PasswordSupplied == passwordSupplied
+            && EngineVersion.Length > 0
+            && string.Equals(EngineVersion, engineVersion, StringComparison.Ordinal);
+
     /// <summary>Serializes this outcome to a single tab-delimited ledger line.</summary>
     public string ToLedgerLine()
     {
@@ -70,6 +90,8 @@ internal sealed class FileOutcome
             Threshold.ToString(CultureInfo.InvariantCulture),
             BelowThresholdCount.ToString(CultureInfo.InvariantCulture),
             dpis,
+            PasswordSupplied ? "1" : "0",
+            EngineVersion,
         });
     }
 
@@ -98,6 +120,12 @@ internal sealed class FileOutcome
             Threshold = ParseInt(parts[11]),
             BelowThresholdCount = ParseInt(parts[12]),
         };
+
+        if (parts.Length > EngineVersionField)
+        {
+            outcome.PasswordSupplied = parts[PasswordSuppliedField] == "1";
+            outcome.EngineVersion = parts[EngineVersionField];
+        }
 
         if (parts[13].Length > 0)
         {

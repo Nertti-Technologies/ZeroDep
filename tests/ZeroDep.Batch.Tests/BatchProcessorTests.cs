@@ -172,6 +172,58 @@ public sealed class BatchProcessorTests : IDisposable
         Assert.Equal(50.0, summary.Statistics.Encryption.EncryptedPercent);
     }
 
+    [Fact]
+    public async Task ResumeReprocessesWhenTheDpiThresholdChanges()
+    {
+        File.WriteAllBytes(Path.Combine(_input, "doc1.pdf"), TextPdf("BT /F1 12 Tf 100 700 Td (Doc) Tj ET"));
+
+        await new BatchProcessor().RunAsync(new BatchOptions { InputDirectory = _input, OutputDirectory = _output, DpiThreshold = 150 });
+        BatchSummary second = await new BatchProcessor().RunAsync(
+            new BatchOptions { InputDirectory = _input, OutputDirectory = _output, DpiThreshold = 300 });
+
+        Assert.Equal(1, second.ProcessedThisRun);
+        Assert.Equal(0, second.Skipped);
+        Assert.Equal(300, second.Statistics.Dpi.Threshold);
+    }
+
+    [Fact]
+    public async Task ResumeReprocessesWhenAPasswordIsSupplied()
+    {
+        File.WriteAllBytes(Path.Combine(_input, "locked.pdf"), Convert.FromBase64String(PasswordProtectedBase64));
+
+        BatchSummary first = await new BatchProcessor().RunAsync(new BatchOptions { InputDirectory = _input, OutputDirectory = _output });
+        Assert.Equal(1, first.EncryptedUnreadable);
+
+        BatchSummary second = await new BatchProcessor().RunAsync(
+            new BatchOptions { InputDirectory = _input, OutputDirectory = _output, Password = "u" });
+
+        Assert.Equal(1, second.ProcessedThisRun);
+        Assert.Equal(0, second.EncryptedUnreadable);
+        Assert.Equal(0, second.Rejected);
+        Assert.DoesNotContain("\tu\t", File.ReadAllText(Path.Combine(_output, "ledger.tsv")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResumeTreatsALedgerLineWithoutRunDetailsAsAMiss()
+    {
+        string pdf = Path.Combine(_input, "doc1.pdf");
+        File.WriteAllBytes(pdf, TextPdf("BT /F1 12 Tf 100 700 Td (Doc) Tj ET"));
+
+        // A line in the earlier 14-field format: right id and content hash, but no password flag or engine version.
+        string oldLine = string.Join("\t", new[]
+        {
+            BatchId.ForPath(Path.GetFullPath(pdf)), BatchId.ForContent(pdf), "Processed", "DigitalText",
+            "1", "0", "0", "None", "0", "0", "None", "150", "0", string.Empty,
+        });
+        Directory.CreateDirectory(_output);
+        File.WriteAllText(Path.Combine(_output, "ledger.tsv"), oldLine + "\n");
+
+        BatchSummary summary = await new BatchProcessor().RunAsync(new BatchOptions { InputDirectory = _input, OutputDirectory = _output });
+
+        Assert.Equal(1, summary.ProcessedThisRun);
+        Assert.Equal(0, summary.Skipped);
+    }
+
     private static bool CanOpen(string path)
     {
         try
