@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using ZeroDep.Abstractions;
 using ZeroDep.Lexing;
 using ZeroDep.Objects;
 
@@ -36,21 +37,46 @@ internal sealed class ContentInterpreter
     public List<ImagePlacement> Run(byte[] content, PdfDictionary resources, Matrix initial)
         => RunAll(content, resources, initial).Images;
 
-    /// <summary>Runs the interpreter and returns both images and text runs.</summary>
+    /// <summary>
+    /// Runs the interpreter and returns both images and text runs. Throws <see cref="PdfSyntaxException"/>
+    /// when the page exceeds the work budget (<see cref="Limits.MaxWorkPerPage"/>) or nests operands deeper
+    /// than <see cref="Limits.MaxOperandDepth"/>.
+    /// </summary>
     public ContentResult RunAll(byte[] content, PdfDictionary resources, Matrix initial)
     {
         var result = new ContentResult();
-        Execute(content, resources, initial, result, 0);
+        Execute(content, resources, initial, result, 0, new RunState());
         return result;
     }
 
-    private void Execute(byte[] content, PdfDictionary resources, Matrix baseCtm, ContentResult result, int depth)
+    // State shared by one page run across nested Form XObjects: the work budget, the forms on the call
+    // stack (a form that invokes itself is skipped), and the decoded content of forms and the fonts
+    // (by object number) already loaded, so repeated form runs do not repeat that work.
+    private sealed class RunState
+    {
+        public long Work;
+        public readonly HashSet<int> ActiveForms = new HashSet<int>();
+        public readonly Dictionary<int, byte[]> FormContent = new Dictionary<int, byte[]>();
+        public readonly Dictionary<int, FontInfo?> Fonts = new Dictionary<int, FontInfo?>();
+
+        public void Charge(long units)
+        {
+            Work += units;
+            if (Work > Limits.MaxWorkPerPage)
+            {
+                throw new PdfSyntaxException($"Page content exceeds the work limit of {Limits.MaxWorkPerPage}.");
+            }
+        }
+    }
+
+    private void Execute(byte[] content, PdfDictionary resources, Matrix baseCtm, ContentResult result, int depth, RunState state)
     {
         if (depth > MaxFormDepth) return;
 
         var lexer = new PdfLexer(content, 0, content.Length);
         var operands = new List<PdfObject>();
         var graphicsStack = new Stack<GraphicsSnapshot>();
+        int ignoredSaves = 0; // q operators beyond Limits.MaxGraphicsStateDepth, matched by Q without a restore
         var fontCache = new Dictionary<string, FontInfo?>(StringComparer.Ordinal);
 
         Matrix ctm = baseCtm;
@@ -88,6 +114,7 @@ internal sealed class ContentInterpreter
 
         void ShowSimple(PdfString s)
         {
+            state.Charge(s.Length);
             if (font is null) return;
             var sb = new StringBuilder();
             double advance = 0;
@@ -167,12 +194,13 @@ internal sealed class ContentInterpreter
         {
             Token token = lexer.Next();
             if (token.Type == TokenType.Eof) break;
+            state.Charge(1);
 
             if (token.Type != TokenType.Keyword)
             {
                 if (token.Type != TokenType.ArrayEnd && token.Type != TokenType.DictEnd)
                 {
-                    operands.Add(ParseOperand(lexer, token));
+                    operands.Add(ParseOperand(lexer, token, 0, state));
                 }
                 continue;
             }
@@ -184,9 +212,16 @@ internal sealed class ContentInterpreter
                 case "false": operands.Add(PdfBoolean.False); continue;
                 case "null": operands.Add(PdfNull.Instance); continue;
 
-                case "q": graphicsStack.Push(new GraphicsSnapshot(ctm, font, fontSize, renderMode, leading, charSpacing, wordSpacing, horizScale)); break;
+                case "q":
+                    if (graphicsStack.Count >= Limits.MaxGraphicsStateDepth) { ignoredSaves++; break; }
+                    graphicsStack.Push(new GraphicsSnapshot(ctm, font, fontSize, renderMode, leading, charSpacing, wordSpacing, horizScale));
+                    break;
                 case "Q":
-                    if (graphicsStack.Count > 0)
+                    if (ignoredSaves > 0)
+                    {
+                        ignoredSaves--;
+                    }
+                    else if (graphicsStack.Count > 0)
                     {
                         GraphicsSnapshot s = graphicsStack.Pop();
                         ctm = s.Ctm; font = s.Font; fontSize = s.FontSize; renderMode = s.RenderMode;
@@ -198,9 +233,9 @@ internal sealed class ContentInterpreter
                     break;
 
                 case "Do":
-                    if (operands.Count >= 1 && operands[operands.Count - 1] is PdfName name) HandleDo(name.Value, resources, ctm, result, depth);
+                    if (operands.Count >= 1 && operands[operands.Count - 1] is PdfName name) HandleDo(name.Value, resources, ctm, result, depth, state);
                     break;
-                case "BI": ParseInlineImage(lexer, ctm, result); break;
+                case "BI": ParseInlineImage(lexer, ctm, result, state); break;
 
                 case "BT": textMatrix = Matrix.Identity; lineMatrix = Matrix.Identity; break;
                 case "ET": break;
@@ -233,12 +268,12 @@ internal sealed class ContentInterpreter
                         fontSize = NumAt(operands, 1);
                         if (operands[operands.Count - 2] is PdfName fontName)
                         {
-                            font = ResolveFont(fontName.Value, resources, fontCache);
+                            font = ResolveFont(fontName.Value, resources, fontCache, state);
                             result.FontNames.Add(fontName.Value);
                         }
                     }
                     break;
-                case "Tr": if (operands.Count >= 1) renderMode = (int)NumAt(operands, 1); break;
+                case "Tr": if (operands.Count >= 1) renderMode = RenderModeOf(NumAt(operands, 1)); break;
 
                 case "Tj":
                     if (operands.Count >= 1 && operands[operands.Count - 1] is PdfString tj) ShowSimple(tj);
@@ -253,6 +288,7 @@ internal sealed class ContentInterpreter
                         {
                             if (item is PdfString s)
                             {
+                                state.Charge(s.Length);
                                 foreach (Glyph g in font.Decode(s.ToArray())) { sb.Append(g.Text); advance += GlyphAdvance(g); Tally(g, ref auth, ref fallback, ref unmapped); }
                             }
                             else if (item is PdfNumber num)
@@ -313,12 +349,13 @@ internal sealed class ContentInterpreter
         }
     }
 
-    private void HandleDo(string name, PdfDictionary resources, Matrix ctm, ContentResult result, int depth)
+    private void HandleDo(string name, PdfDictionary resources, Matrix ctm, ContentResult result, int depth, RunState state)
     {
         if (_resolve(resources["XObject"] ?? PdfNull.Instance) is not PdfDictionary xobjects) return;
         PdfObject? entry = xobjects[name];
         if (entry is null) return;
         if (_resolve(entry) is not PdfStream stream) return;
+        int formNumber = entry is PdfReference reference ? reference.ObjectNumber : -1;
 
         string? subtype = (stream.Dictionary["Subtype"] as PdfName)?.Value;
         if (subtype == "Image")
@@ -330,20 +367,63 @@ internal sealed class ContentInterpreter
             Matrix formMatrix = Matrix.Identity;
             if (_resolve(stream.Dictionary["Matrix"] ?? PdfNull.Instance) is PdfArray m && m.Count >= 6) formMatrix = MatrixFromArray(m);
             PdfDictionary formResources = _resolve(stream.Dictionary["Resources"] ?? PdfNull.Instance) as PdfDictionary ?? resources;
-            byte[] formContent = _decode(stream);
-            Execute(formContent, formResources, Matrix.Multiply(formMatrix, ctm), result, depth + 1);
+
+            // A form already on the call stack would recurse into itself: skip it.
+            if (formNumber >= 0 && state.ActiveForms.Contains(formNumber)) return;
+
+            // Decode each form once per page; a form invoked many times reuses its content.
+            byte[] formContent;
+            if (formNumber < 0)
+            {
+                formContent = _decode(stream);
+            }
+            else if (!state.FormContent.TryGetValue(formNumber, out formContent!))
+            {
+                formContent = _decode(stream);
+                state.FormContent[formNumber] = formContent;
+            }
+
+            // Every run of a form costs at least one unit, plus its size, so fan-out through nested forms is
+            // bounded even when the forms hold only whitespace.
+            state.Charge(1 + (formContent.Length / Limits.FormBytesPerWorkUnit));
+
+            if (formNumber >= 0) state.ActiveForms.Add(formNumber);
+            try
+            {
+                Execute(formContent, formResources, Matrix.Multiply(formMatrix, ctm), result, depth + 1, state);
+            }
+            finally
+            {
+                if (formNumber >= 0) state.ActiveForms.Remove(formNumber);
+            }
         }
     }
 
-    private FontInfo? ResolveFont(string name, PdfDictionary resources, Dictionary<string, FontInfo?> cache)
+    private FontInfo? ResolveFont(string name, PdfDictionary resources, Dictionary<string, FontInfo?> cache, RunState state)
     {
         if (cache.TryGetValue(name, out FontInfo? cached)) return cached;
 
         FontInfo? font = null;
-        if (_resolve(resources["Font"] ?? PdfNull.Instance) is PdfDictionary fonts
-            && _resolve(fonts[name] ?? PdfNull.Instance) is PdfDictionary fontDict)
+        if (_resolve(resources["Font"] ?? PdfNull.Instance) is PdfDictionary fonts)
         {
-            font = new FontInfo(fontDict, _resolve, _decode);
+            PdfObject? entry = fonts[name];
+            int fontNumber = entry is PdfReference reference ? reference.ObjectNumber : -1;
+            if (fontNumber >= 0 && state.Fonts.TryGetValue(fontNumber, out FontInfo? shared))
+            {
+                font = shared;
+            }
+            else
+            {
+                if (_resolve(entry ?? PdfNull.Instance) is PdfDictionary fontDict)
+                {
+                    font = new FontInfo(fontDict, _resolve, _decode);
+
+                    // Building a font's maps allocates per entry: charge it to the page budget.
+                    state.Charge(1 + (font.MapEntryCount * Limits.WorkPerMapEntry));
+                }
+
+                if (fontNumber >= 0) state.Fonts[fontNumber] = font;
+            }
         }
         cache[name] = font;
         return font;
@@ -352,6 +432,9 @@ internal sealed class ContentInterpreter
     private static Matrix Translate(double tx, double ty) => new Matrix(1, 0, 0, 1, tx, ty);
 
     private static double Hypot(double a, double b) => Math.Sqrt((a * a) + (b * b));
+
+    // Text render modes are 0..7; NaN or out-of-range values must not reach an unchecked int cast.
+    private static int RenderModeOf(double v) => v >= 0 && v <= 7 ? (int)v : 0;
 
     private static double NumAt(List<PdfObject> operands, int fromEnd)
         => operands.Count >= fromEnd && operands[operands.Count - fromEnd] is PdfNumber n ? n.AsDouble : 0;
@@ -369,8 +452,15 @@ internal sealed class ContentInterpreter
         return new Matrix(V(0), V(1), V(2), V(3), V(4), V(5));
     }
 
-    private static PdfObject ParseOperand(PdfLexer lexer, Token token)
+    // 'depth' is the array/dictionary nesting level; beyond Limits.MaxOperandDepth the stream is rejected
+    // rather than recursing further. Each nested token is charged to the page budget.
+    private static PdfObject ParseOperand(PdfLexer lexer, Token token, int depth, RunState state)
     {
+        if (depth > Limits.MaxOperandDepth)
+        {
+            throw new PdfSyntaxException($"Content operand nesting exceeds the limit of {Limits.MaxOperandDepth}.");
+        }
+
         switch (token.Type)
         {
             case TokenType.Integer: return new PdfInteger(token.IntValue);
@@ -385,7 +475,8 @@ internal sealed class ContentInterpreter
                 {
                     Token x = lexer.Next();
                     if (x.Type == TokenType.ArrayEnd || x.Type == TokenType.Eof) break;
-                    items.Add(ParseOperand(lexer, x));
+                    state.Charge(1);
+                    items.Add(ParseOperand(lexer, x, depth + 1, state));
                 }
                 return new PdfArray(items);
             }
@@ -399,7 +490,8 @@ internal sealed class ContentInterpreter
                     if (key.Type != TokenType.Name) break;
                     Token value = lexer.Next();
                     if (value.Type == TokenType.DictEnd || value.Type == TokenType.Eof) break;
-                    map[key.Text!] = ParseOperand(lexer, value);
+                    state.Charge(2);
+                    map[key.Text!] = ParseOperand(lexer, value, depth + 1, state);
                 }
                 return new PdfDictionary(map);
             }
@@ -415,7 +507,7 @@ internal sealed class ContentInterpreter
         }
     }
 
-    private static void ParseInlineImage(PdfLexer lexer, Matrix ctm, ContentResult result)
+    private static void ParseInlineImage(PdfLexer lexer, Matrix ctm, ContentResult result, RunState state)
     {
         // Parse the inline-image dictionary (abbreviated keys) up to the 'ID' operator.
         var entries = new Dictionary<string, PdfObject>(StringComparer.Ordinal);
@@ -429,7 +521,8 @@ internal sealed class ContentInterpreter
             Token valueToken = lexer.Next();
             if (valueToken.Type == TokenType.Eof) return;
             if (valueToken.Type == TokenType.Keyword && valueToken.Text == "ID") break;
-            entries[MapInlineKey(key.Text!)] = ParseOperand(lexer, valueToken);
+            state.Charge(2);
+            entries[MapInlineKey(key.Text!)] = ParseOperand(lexer, valueToken, 0, state);
         }
 
         SkipToEndImage(lexer);
