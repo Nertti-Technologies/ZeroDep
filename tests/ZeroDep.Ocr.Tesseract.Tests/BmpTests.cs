@@ -1,3 +1,4 @@
+using System;
 using Xunit;
 using ZeroDep.Ocr;
 using ZeroDep.Ocr.Tesseract;
@@ -57,6 +58,20 @@ public sealed class BmpTests
         Assert.Equal(200, bmp[row]);
         Assert.Equal(200, bmp[row + 1]);
         Assert.Equal(200, bmp[row + 2]);
+    }
+
+    // Width x height x 3 overflowed int and produced a short array (or an index error) before.
+    [Theory]
+    [InlineData(int.MaxValue, 2)]
+    [InlineData(50_000, 50_000)]
+    [InlineData(-1, 1)]
+    public void Encode_OversizedOrNegative_ThrowsArgumentException(int width, int height)
+    {
+        var image = new DecodedImage { Width = width, Height = height, Format = PixelFormat.Gray8 };
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Throws<ArgumentException>(() => Bmp.Encode(image));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 1024 * 1024);
     }
 
     private static int ReadInt32(byte[] b, int o) => b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24);
