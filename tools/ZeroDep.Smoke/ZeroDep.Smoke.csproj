@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Release smoke gate (ADR-0012): drives the built ZeroDep CLI as a child process over a sample of a local
+    corpus of real PDFs. A build-time tool only: not packed, not referenced by any shipped project, and it takes
+    no packages (BCL only).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <RootNamespace>ZeroDep.Smoke</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="ZeroDep.Smoke.Tests" />
+  </ItemGroup>
+</Project>

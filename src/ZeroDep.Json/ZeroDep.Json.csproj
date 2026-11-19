@@ -9,5 +9,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="ZeroDep.Json.Tests" />
     <InternalsVisibleTo Include="ZeroDep.Batch" />
+    <InternalsVisibleTo Include="ZeroDep" />
   </ItemGroup>
 </Project>

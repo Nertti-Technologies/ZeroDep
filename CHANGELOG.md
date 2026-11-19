@@ -4,7 +4,7 @@ All notable changes to **ZeroDep** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 2.2.0 — Unreleased
+## 2.2.0 — 2026-11-20
 
 ### Added
 
@@ -19,6 +19,13 @@ All notable changes to **ZeroDep** are documented here. The format follows
   `AnalyzerOptions.Limits`. Every `PdfAnalyzer` method gains an `(Stream, AnalyzerOptions)` overload, the
   public stream and image decoders and `ColorConverter.ToRgb` gain a `PdfLimits` overload, and the existing
   overloads keep their behaviour.
+- **Streaming JSON output.** `PdfAnalyzer.WriteJson(Stream input, Stream output, …)` and
+  `DocumentJson.Write(DocumentAnalysis, TextWriter, bool)` write the same JSON as `ToJson` as they go, instead
+  of building it in memory (UTF-8, no byte-order mark). `ToJson` is unchanged.
+- **`PdfLimits.WorkPerSourceByte`** (default 256) and `PdfLimits.DocumentWorkBudget(long)`. The document work
+  budget is now `MaxWorkPerDocument` plus this allowance for each byte of the file, so large scanned books
+  with a text layer are processed instead of rejected, while a small file is still bounded by the base
+  budget. Set it to 0 for a fixed budget. A rejection message shows how the budget was derived.
 - **`PdfLimitExceededException`**, derived from `PdfSyntaxException`, with `LimitName` and `Limit`. Public
   decoders still throw `InvalidDataException` and carry it as the inner exception.
 - **`RejectionReason.ResourceLimitExceeded`** for documents rejected because a limit was hit.
@@ -39,9 +46,20 @@ All notable changes to **ZeroDep** are documented here. The format follows
   rejected instead of being treated as PNG prediction.
 - The TrueType hinting interpreter now has an instruction budget of 1,000,000 for each program (font,
   control value and glyph); a font that exceeds it falls back to the unhinted outline.
+- **Batch default concurrency** is now the processor count capped at 4 (`BatchOptions.DefaultMaxConcurrency`),
+  so a default run over large books stays within a laptop's memory. An explicit `MaxConcurrency` or
+  `--concurrency=N` is unchanged.
 
 ### Fixed
 
+- **JSON memory use in the CLI and the batch runner.** Both built each document's JSON as one string, at about
+  5 bytes of memory per character of output: an 800-page book (337 MB of JSON) peaked at 1.9 GB. They now
+  stream it, so the peak stays close to that of the analysis itself.
+
+- **CLI text report on rejected documents.** `zerodep <file.pdf>` without `--json` crashed with an unhandled
+  exception when a document exceeded a resource limit or could not be read. It now prints
+  `rejected (<reason>): <message>` to standard error and exits with code 3; `--json` already reported these
+  as a `Rejected` status.
 - **Bounded processing of malformed input.** Parsing, stream and image decoding, colour conversion, content
   interpretation and font handling now enforce fixed limits on nesting depth, decoded size, pixel count and
   work, and detect reference cycles. An input that exceeds a limit is rejected, or the affected page, image

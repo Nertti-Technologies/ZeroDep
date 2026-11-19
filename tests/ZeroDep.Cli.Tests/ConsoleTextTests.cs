@@ -72,6 +72,31 @@ public sealed class ConsoleTextTests
         }
     }
 
+    [Fact]
+    public void RejectionLineNamesALimitBreach()
+    {
+        var ex = new PdfLimitExceededException("MaxWorkPerDocument", 250_000_000, "Document exceeds the work limit of 250000000.");
+
+        Assert.Equal(
+            "rejected (resource limit exceeded): Document exceeds the work limit of 250000000.",
+            ConsoleText.RejectionLine(ex));
+    }
+
+    [Fact]
+    public void RejectionLineNamesAnUnreadableDocument()
+    {
+        Assert.StartsWith("rejected (unreadable document): ", ConsoleText.RejectionLine(new PdfSyntaxException("bad xref")));
+    }
+
+    [Fact]
+    public void RejectionLineEscapesAndBoundsTheMessage()
+    {
+        string line = ConsoleText.RejectionLine(new PdfSyntaxException("name" + Hostile + new string('x', 500)));
+
+        AssertNoControls(line);
+        Assert.True(line.Length < 260, $"line was {line.Length} characters");
+    }
+
     private static void AssertNoControls(string line)
     {
         foreach (char c in line)

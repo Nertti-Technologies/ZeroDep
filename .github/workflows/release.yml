@@ -57,6 +57,30 @@ jobs:
             echo "::warning::README roadmap row for ${VERSION} is not marked 'Released': ${roadmap}"
           fi
 
+      # Release gate: the real-document smoke run must have passed for exactly these build inputs. The run needs
+      # the owner's private corpus, so it happens locally (tools/ZeroDep.Smoke --attest) and its hash-only
+      # attestation is committed. Any later change to a build input changes the hash and fails here.
+      # Hidden coupling: the path list below must match Git.BuildInputs in tools/ZeroDep.Smoke/Git.cs, in order.
+      - name: Verify the smoke attestation matches this release
+        run: |
+          set -euo pipefail
+          f=build/smoke-attestation.json
+          if [ ! -f "$f" ]; then
+            echo "::error::$f is missing. Run 'dotnet run --project tools/ZeroDep.Smoke -c Release -- <corpus> --attest' and commit it."
+            exit 1
+          fi
+          inputs="$(git ls-tree -r HEAD -- src Directory.Build.props global.json build/IsExternalInit.cs build/OverloadResolutionPriorityAttribute.cs | sha256sum | cut -d' ' -f1)"
+          if ! jq -e --arg h "$inputs" '.schemaVersion == 2 and .buildInputs == $h' "$f" > /dev/null; then
+            echo "::error::$f was made for build inputs $(jq -r .buildInputs "$f"), but this release is $inputs. Re-run the smoke gate."
+            exit 1
+          fi
+          # Hidden coupling: 20 is Attestation.MinimumSample in tools/ZeroDep.Smoke/Attestation.cs.
+          if ! jq -e '.sample >= 20 and .failed == 0 and (.rejected == 0 or .rejectionsAccepted == true)' "$f" > /dev/null; then
+            echo "::error::$f covers fewer than 20 documents, or records failed or unaccepted rejected documents."
+            exit 1
+          fi
+          echo "Smoke attestation ok: $(jq -r '"\(.sample) documents, \(.rejected) rejected, seed \(.seed), \(.createdUtc)"' "$f")"
+
       - name: Build
         run: dotnet build ZeroDep.slnx -c Release -p:Version="$VERSION"
 
@@ -69,7 +93,7 @@ jobs:
       # Trusted Publishing: exchange the GitHub OIDC token for a short-lived nuget.org key.
       # Run immediately before push — the key is valid for 1 hour.
       - name: NuGet login (OIDC → short-lived key)
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0 (Apache-2.0)
         id: login
         with:
           user: ${{ secrets.NUGET_USER }}

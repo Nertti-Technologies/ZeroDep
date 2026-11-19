@@ -26,7 +26,7 @@ foreach (string arg in args)
 
 if (path is null)
 {
-    Console.Error.WriteLine("usage: zerodep <file.pdf> [dpiThreshold] [--json] [--password=PW]");
+    Console.Error.WriteLine("usage: zerodep <file.pdf> [dpiThreshold] [--json] [--password=PW]   (exit 3: document rejected)");
     return 1;
 }
 if (!File.Exists(path))
@@ -37,64 +37,86 @@ if (!File.Exists(path))
 
 if (json)
 {
+    // Streamed (ADR-0013): a large book produces hundreds of megabytes of JSON, which must not be built in memory.
+    // The raw standard output is used, so the bytes are UTF-8 whatever the console encoding is.
     using FileStream s = File.OpenRead(path);
-    Console.WriteLine(PdfAnalyzer.ToJson(s, indent: true, threshold, password));
+    using Stream stdout = Console.OpenStandardOutput();
+    PdfAnalyzer.WriteJson(s, stdout, new AnalyzerOptions { DpiThreshold = threshold, Password = password }, indent: true);
+    byte[] newline = System.Text.Encoding.UTF8.GetBytes(Environment.NewLine); // as Console.WriteLine ended it before
+    stdout.Write(newline, 0, newline.Length);
     return 0;
 }
 
 Console.WriteLine($"== {Path.GetFileName(path)} ==");
 
-using (FileStream stream = File.OpenRead(path))
+try
 {
-    var images = PdfAnalyzer.AnalyzeImageDpi(stream, threshold, password);
-    int low = 0;
-    foreach (ImageDpiInfo image in images)
-    {
-        if (image.IsBelowThreshold) low++;
-    }
-    Console.WriteLine($"\nImages: {images.Count}  (below {threshold} DPI: {low})");
-    foreach (ImageDpiInfo image in images)
-    {
-        Console.WriteLine(ConsoleText.ImageLine(image));
-    }
+    PrintReport(path, threshold, password);
 }
-
-using (FileStream stream = File.OpenRead(path))
+catch (PdfSyntaxException ex)
 {
-    AcroFormReport form = PdfAnalyzer.ExtractForm(stream, password);
-    Console.WriteLine($"\nAcroForm: {(form.HasAcroForm ? form.Fields.Count + " fields" : "none")}");
-    foreach (FormFieldInfo field in form.Fields)
-    {
-        Console.WriteLine(ConsoleText.FieldLine(field));
-    }
-}
-
-using (FileStream stream = File.OpenRead(path))
-{
-    var runs = PdfAnalyzer.ExtractText(stream, password);
-    int ocr = 0;
-    foreach (TextRunInfo r in runs)
-    {
-        if (r.IsOcrLayer) ocr++;
-    }
-    Console.WriteLine($"\nText runs: {runs.Count}  (OCR-layer: {ocr})");
-}
-
-using (FileStream stream = File.OpenRead(path))
-{
-    string text = PdfAnalyzer.ExtractPlainText(stream, password);
-    Console.WriteLine("\n--- text (first 30 non-empty lines) ---");
-    int shown = 0;
-    foreach (string line in text.Split('\n'))
-    {
-        string clean = ConsoleText.Clean(line).Trim();
-        if (clean.Length == 0) continue;
-        Console.WriteLine(ConsoleText.Truncate(clean, 100));
-        if (++shown >= 30) break;
-    }
+    // The --json path reports the same failure as a Rejected status; here it ends the report with exit 3.
+    // Hidden coupling: the release smoke gate (tools/ZeroDep.Smoke/DocumentChecks.cs) treats exit 3 as "rejected",
+    // any other non-zero exit or an "Unhandled exception" on stderr as a crash, and reads the JSON fields
+    // status, pageCount and rejection.reason/detail. Change both together.
+    Console.Error.WriteLine(ConsoleText.RejectionLine(ex));
+    return 3;
 }
 
 return 0;
+
+static void PrintReport(string path, int threshold, string? password)
+{
+    using (FileStream stream = File.OpenRead(path))
+    {
+        var images = PdfAnalyzer.AnalyzeImageDpi(stream, threshold, password);
+        int low = 0;
+        foreach (ImageDpiInfo image in images)
+        {
+            if (image.IsBelowThreshold) low++;
+        }
+        Console.WriteLine($"\nImages: {images.Count}  (below {threshold} DPI: {low})");
+        foreach (ImageDpiInfo image in images)
+        {
+            Console.WriteLine(ConsoleText.ImageLine(image));
+        }
+    }
+
+    using (FileStream stream = File.OpenRead(path))
+    {
+        AcroFormReport form = PdfAnalyzer.ExtractForm(stream, password);
+        Console.WriteLine($"\nAcroForm: {(form.HasAcroForm ? form.Fields.Count + " fields" : "none")}");
+        foreach (FormFieldInfo field in form.Fields)
+        {
+            Console.WriteLine(ConsoleText.FieldLine(field));
+        }
+    }
+
+    using (FileStream stream = File.OpenRead(path))
+    {
+        var runs = PdfAnalyzer.ExtractText(stream, password);
+        int ocr = 0;
+        foreach (TextRunInfo r in runs)
+        {
+            if (r.IsOcrLayer) ocr++;
+        }
+        Console.WriteLine($"\nText runs: {runs.Count}  (OCR-layer: {ocr})");
+    }
+
+    using (FileStream stream = File.OpenRead(path))
+    {
+        string text = PdfAnalyzer.ExtractPlainText(stream, password);
+        Console.WriteLine("\n--- text (first 30 non-empty lines) ---");
+        int shown = 0;
+        foreach (string line in text.Split('\n'))
+        {
+            string clean = ConsoleText.Clean(line).Trim();
+            if (clean.Length == 0) continue;
+            Console.WriteLine(ConsoleText.Truncate(clean, 100));
+            if (++shown >= 30) break;
+        }
+    }
+}
 
 static async Task<int> RunBatchAsync(string[] args)
 {
@@ -104,7 +126,7 @@ static async Task<int> RunBatchAsync(string[] args)
     string? pw = null;
     bool resume = true;
     bool perFile = true;
-    int concurrency = Environment.ProcessorCount;
+    int concurrency = BatchOptions.DefaultMaxConcurrency;
 
     for (int i = 1; i < args.Length; i++)
     {

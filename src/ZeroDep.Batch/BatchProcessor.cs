@@ -21,6 +21,8 @@ public sealed class BatchProcessor
 {
     private const string LedgerFileName = "ledger.tsv";
     private const string AggregateFileName = "aggregate.json";
+    // Hidden coupling: the release smoke gate (tools/ZeroDep.Smoke/Program.cs) counts the files in this folder
+    // to check the batch run. Rename it in both places.
     private const string PerFileDirectoryName = "perfile";
 
     private readonly object _ledgerLock = new object();
@@ -139,13 +141,25 @@ public sealed class BatchProcessor
 
         if (options.WritePerFileJson)
         {
+            // Streamed (ADR-0013) to a temporary name and renamed when complete, so a failure part-way never leaves a
+            // truncated <id>.json behind. The release smoke gate counts the *.json files in this folder.
+            string final = Path.Combine(perFileRoot, id + ".json");
+            string partial = final + ".partial";
             try
             {
-                File.WriteAllText(Path.Combine(perFileRoot, id + ".json"), DocumentJson.Write(analysis, indent: false));
+                using (var file = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (StreamWriter writer = JsonOutput.CreateWriter(file))
+                {
+                    DocumentJson.Write(analysis, writer, indent: false);
+                }
+
+                if (File.Exists(final)) File.Delete(final);
+                File.Move(partial, final);
             }
             catch (Exception)
             {
                 // A per-file output that cannot be written is isolated to this file, like a failed analysis.
+                TryDelete(partial);
                 return RejectedOutcome(id, contentHash, options);
             }
         }
@@ -247,5 +261,17 @@ public sealed class BatchProcessor
         }
 
         return map;
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception)
+        {
+            // best effort: the partial file is only ever left behind when its folder is not writable
+        }
     }
 }

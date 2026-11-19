@@ -156,6 +156,14 @@ string json = PdfAnalyzer.ToJson(File.OpenRead("invoice.pdf"), indent: true);
 File.WriteAllText("invoice.json", json);
 ```
 
+`ToJson` builds the whole document in memory. For large files, stream it instead; the output is identical
+(UTF-8, no byte-order mark):
+
+```csharp
+using FileStream output = File.Create("book.json");
+PdfAnalyzer.WriteJson(File.OpenRead("book.pdf"), output, indent: true);
+```
+
 ### Decode a JPEG to pixels
 
 ```csharp
@@ -258,6 +266,7 @@ var options = new AnalyzerOptions
     {
         MaxDecodedStreamBytes = 64L * 1024 * 1024,  // 64 MiB per decoded stream
         MaxWorkPerDocument = 100_000_000,
+        WorkPerSourceByte = 0,                     // the same work budget whatever the file size
     },
 };
 
@@ -277,13 +286,15 @@ decoders and `ColorConverter.ToRgb` have overloads that take a `PdfLimits`. The 
 | `MaxDecodedStreamBytes` | 256 MiB | Output of one decoded stream; also the largest object read from the file |
 | `MaxImagePixels` | 2<sup>28</sup> (268,435,456) | Pixels in one image; a decoder's working set is 4 bytes per allowed pixel |
 | `MaxWorkPerPage` | 50,000,000 | Content operators and glyphs interpreted for one page, including Form XObjects |
-| `MaxWorkPerDocument` | 250,000,000 | All content work plus object reads (one unit per 64 bytes) across the document |
+| `MaxWorkPerDocument` | 250,000,000 | Base budget for all content work plus object reads (one unit per 64 bytes) across the document |
+| `WorkPerSourceByte` | 256 | Work added to the document budget per byte of the file, so large scanned books fit while small files stay bounded by the base |
 | `MaxFormFields` | 100,000 | Interactive form fields |
 | `MaxCMapEntries` | 1,048,576 | Entries in one font character map or width table |
 
 The defaults are **estimates**: sized to stay well above what ordinary documents need while keeping one
-analysis within a few gigabytes of memory, not measured against a corpus. Each value must be greater than
-zero; a value of zero or less throws `ArgumentOutOfRangeException`.
+analysis within a few gigabytes of memory. Only the document work budget has been checked against real
+books so far. Each value must be greater than zero, except `WorkPerSourceByte`, which may be zero to turn
+the allowance off; a value out of range throws `ArgumentOutOfRangeException`.
 
 What happens when a limit is exceeded:
 
@@ -315,7 +326,8 @@ zerodep batch ./corpus --output=./batch-out
 The `batch` verb is **resumable** and **parallel**. It writes three things under the output folder:
 a resumable ledger, optional per-file JSON (`--no-perfile` to skip), and a publishable
 `aggregate.json` containing **aggregates and counts only** — no file names, extracted text, or field
-values. Useful flags: `--concurrency=N`, `--threshold=N`, `--no-resume`, `--no-perfile`.
+values. Useful flags: `--concurrency=N` (default: the processor count, at most 4), `--threshold=N`,
+`--no-resume`, `--no-perfile`.
 
 ### Batch from code
 
@@ -420,6 +432,15 @@ package.
 
 Issues and pull requests are welcome. Please run `dotnet test ZeroDep.slnx -c Release` before
 submitting; all targets must build clean (warnings are treated as errors).
+
+Releases also pass a smoke gate over real documents. `tools/ZeroDep.Smoke` runs the built CLI (text, JSON and
+batch modes) over a random sample of a local PDF folder, one document at a time with a timeout and a memory
+ceiling. With `--attest` it writes `build/smoke-attestation.json`, which holds file hashes and counts only. The
+release workflow refuses to publish unless that file matches the source being released:
+
+```
+dotnet run --project tools/ZeroDep.Smoke -c Release -- <pdfFolder> [--sample=N | --all] [--seed=S] --attest
+```
 
 ## License
 

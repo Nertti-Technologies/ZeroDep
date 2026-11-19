@@ -17,6 +17,7 @@ public sealed class PdfLimitsTests
         Assert.Equal(250_000_000L, limits.MaxWorkPerDocument);
         Assert.Equal(100_000, limits.MaxFormFields);
         Assert.Equal(1_048_576, limits.MaxCMapEntries);
+        Assert.Equal(256L, limits.WorkPerSourceByte);
     }
 
     [Fact]
@@ -30,6 +31,7 @@ public sealed class PdfLimitsTests
         Assert.Equal(PdfLimits.Default.MaxWorkPerDocument, limits.MaxWorkPerDocument);
         Assert.Equal(PdfLimits.Default.MaxFormFields, limits.MaxFormFields);
         Assert.Equal(PdfLimits.Default.MaxCMapEntries, limits.MaxCMapEntries);
+        Assert.Equal(PdfLimits.Default.WorkPerSourceByte, limits.WorkPerSourceByte);
     }
 
     [Fact]
@@ -66,6 +68,42 @@ public sealed class PdfLimitsTests
         AssertRejected(nameof(PdfLimits.MaxWorkPerDocument), () => new PdfLimits { MaxWorkPerDocument = value });
         AssertRejected(nameof(PdfLimits.MaxFormFields), () => new PdfLimits { MaxFormFields = small });
         AssertRejected(nameof(PdfLimits.MaxCMapEntries), () => new PdfLimits { MaxCMapEntries = small });
+    }
+
+    [Fact]
+    public void WorkPerSourceByte_AllowsZeroAndRejectsNegative()
+    {
+        Assert.Equal(0, new PdfLimits { WorkPerSourceByte = 0 }.WorkPerSourceByte);
+        AssertRejected(nameof(PdfLimits.WorkPerSourceByte), () => new PdfLimits { WorkPerSourceByte = -1 });
+    }
+
+    [Theory]
+    [InlineData(1_000L, 0L, 0L, 1_000L)]
+    [InlineData(1_000L, 0L, 5_000L, 1_000L)]
+    [InlineData(1_000L, 256L, 0L, 1_000L)]
+    [InlineData(1_000L, 256L, 10L, 3_560L)]
+    [InlineData(250_000_000L, 256L, 4_152_398L, 1_313_013_888L)] // the scanned book from ADR-0011
+    public void DocumentWorkBudget_IsTheBasePlusThePerByteAllowance(long baseWork, long perByte, long length, long expected)
+    {
+        var limits = new PdfLimits { MaxWorkPerDocument = baseWork, WorkPerSourceByte = perByte };
+
+        Assert.Equal(expected, limits.DocumentWorkBudget(length));
+    }
+
+    [Fact]
+    public void DocumentWorkBudget_SaturatesAndNeverLowersTheBase()
+    {
+        var limits = new PdfLimits { MaxWorkPerDocument = long.MaxValue - 10, WorkPerSourceByte = long.MaxValue };
+
+        Assert.Equal(long.MaxValue, limits.DocumentWorkBudget(1));
+        Assert.Equal(long.MaxValue, PdfLimits.Default.DocumentWorkBudget(long.MaxValue));
+        Assert.True(PdfLimits.Default.DocumentWorkBudget(1) >= PdfLimits.Default.MaxWorkPerDocument);
+    }
+
+    [Fact]
+    public void DocumentWorkBudget_RejectsANegativeLength()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => PdfLimits.Default.DocumentWorkBudget(-1));
     }
 
     [Fact]

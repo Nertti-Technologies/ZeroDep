@@ -64,6 +64,10 @@ public sealed class PdfLimitExceededException : PdfSyntaxException
     /// </summary>
     public string LimitName { get; }
 
-    /// <summary>The value of the limit that was exceeded, or 0 when not known.</summary>
+    /// <summary>
+    /// The value of the limit that was exceeded, or 0 when not known. For <c>MaxWorkPerDocument</c> it is the budget
+    /// actually enforced for that file, <see cref="PdfLimits.DocumentWorkBudget(long)"/>: the base plus the per-byte
+    /// allowance, which can be larger than the <see cref="PdfLimits.MaxWorkPerDocument"/> setting.
+    /// </summary>
     public long Limit { get; }
 }

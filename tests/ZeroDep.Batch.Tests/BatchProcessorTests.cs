@@ -36,6 +36,27 @@ public sealed class BatchProcessorTests : IDisposable
     }
 
     [Fact]
+    public void DefaultConcurrency_IsTheProcessorCountCappedAtFour()
+    {
+        Assert.Equal(Math.Min(Environment.ProcessorCount, 4), BatchOptions.DefaultMaxConcurrency);
+        Assert.Equal(BatchOptions.DefaultMaxConcurrency, new BatchOptions().MaxConcurrency);
+        Assert.Equal(16, new BatchOptions { MaxConcurrency = 16 }.MaxConcurrency); // an explicit value is kept
+    }
+
+    [Fact]
+    public async Task PerFileJson_IsTheSerializedAnalysisWithoutAByteOrderMark()
+    {
+        byte[] pdf = TextPdf("BT /F1 12 Tf 100 700 Td (Streamed) Tj ET");
+        File.WriteAllBytes(Path.Combine(_input, "doc.pdf"), pdf);
+
+        await new BatchProcessor().RunAsync(new BatchOptions { InputDirectory = _input, OutputDirectory = _output });
+
+        string file = Assert.Single(Directory.GetFiles(Path.Combine(_output, "perfile"), "*.json"));
+        byte[] expected = Encoding.UTF8.GetBytes(ZeroDep.Json.DocumentJson.Write(PdfAnalyzer.Analyze(new MemoryStream(pdf)), indent: false));
+        Assert.Equal(expected, File.ReadAllBytes(file));
+    }
+
+    [Fact]
     public async Task RunProducesLedgerAggregateAndPerFileOutputs()
     {
         File.WriteAllBytes(Path.Combine(_input, "doc1.pdf"), TextPdf("BT /F1 12 Tf 100 700 Td (HelloZeroDep) Tj ET"));
@@ -148,6 +169,7 @@ public sealed class BatchProcessorTests : IDisposable
             Assert.Equal(1, summary.Total);
             Assert.Equal(1, summary.Rejected);
             Assert.True(File.Exists(summary.AggregatePath));
+            Assert.Empty(Directory.GetFiles(perFile)); // neither a truncated .json nor a .partial is left behind
         }
         finally
         {

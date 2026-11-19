@@ -18,30 +18,55 @@ namespace ZeroDep.Objects;
 internal sealed class ResourceBudget
 {
     private long _work;
+    private bool _exceeded;
 
+    /// <summary>Creates a budget with no per-byte allowance (for content run without a source file).</summary>
     public ResourceBudget(PdfLimits limits)
+        : this(limits, 0)
+    {
+    }
+
+    /// <summary>Creates the budget for a file of <paramref name="sourceLength"/> bytes (ADR-0011).</summary>
+    public ResourceBudget(PdfLimits limits, long sourceLength)
     {
         Limits = limits ?? throw new ArgumentNullException(nameof(limits));
+        SourceLength = sourceLength;
+        MaxWork = limits.DocumentWorkBudget(sourceLength);
     }
 
     /// <summary>The caller's limits for this document.</summary>
     public PdfLimits Limits { get; }
 
+    /// <summary>The length of the source file in bytes; zero when there is none.</summary>
+    public long SourceLength { get; }
+
+    /// <summary>The document work budget: the base plus the per-byte allowance for <see cref="SourceLength"/>.</summary>
+    public long MaxWork { get; }
+
     /// <summary>Work units charged to the document so far.</summary>
     public long Work => _work;
 
     /// <summary>Charges <paramref name="units"/> to the document work budget.</summary>
-    /// <exception cref="PdfLimitExceededException">The total exceeds <see cref="PdfLimits.MaxWorkPerDocument"/>.</exception>
+    /// <exception cref="PdfLimitExceededException">The total exceeds <see cref="MaxWork"/>.</exception>
     public void Charge(long units)
     {
-        _work += units;
-        if (_work > Limits.MaxWorkPerDocument)
+        // Compared before adding, so the counter cannot overflow even when MaxWork saturates at long.MaxValue.
+        if (_exceeded || units > MaxWork - _work)
         {
-            throw new PdfLimitExceededException(
-                nameof(PdfLimits.MaxWorkPerDocument),
-                Limits.MaxWorkPerDocument,
-                $"Document exceeds the work limit of {Limits.MaxWorkPerDocument}.");
+            _exceeded = true;
+            // The limit name stays MaxWorkPerDocument: IsDocumentLimit and callers match on it.
+            throw new PdfLimitExceededException(nameof(PdfLimits.MaxWorkPerDocument), MaxWork, LimitMessage());
         }
+
+        _work += units;
+    }
+
+    private string LimitMessage()
+    {
+        string message = FormattableString.Invariant($"Document exceeds the work limit of {MaxWork}");
+        if (MaxWork == Limits.MaxWorkPerDocument) return message + ".";
+        return message + FormattableString.Invariant(
+            $" ({Limits.MaxWorkPerDocument} base + {Limits.WorkPerSourceByte} per byte for {SourceLength} bytes).");
     }
 
     /// <summary>
