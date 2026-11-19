@@ -18,20 +18,28 @@ internal static class DpiAnalyzer
 
     /// <summary>Opens a PDF stream and analyzes image DPI across all pages.</summary>
     public static IReadOnlyList<ImageDpiInfo> Analyze(Stream stream, int threshold, string? password = null)
+        => Analyze(stream, threshold, password, PdfLimits.Default);
+
+    /// <summary>Opens a PDF stream within <paramref name="limits"/> and analyzes image DPI across all pages.</summary>
+    public static IReadOnlyList<ImageDpiInfo> Analyze(Stream stream, int threshold, string? password, PdfLimits limits)
     {
-        using PdfDocument document = PdfDocument.Open(stream, password);
+        using PdfDocument document = PdfDocument.Open(stream, password, limits);
         return Analyze(document, threshold);
     }
 
-    /// <summary>Analyzes image DPI across all pages of an open document.</summary>
-    public static IReadOnlyList<ImageDpiInfo> Analyze(PdfDocument document, int threshold)
+    /// <summary>
+    /// Analyzes image DPI across all pages of an open document. A page whose content cannot be read is skipped
+    /// and, when <paramref name="incomplete"/> is given, recorded there; a breach of the document work budget
+    /// is not absorbed.
+    /// </summary>
+    public static IReadOnlyList<ImageDpiInfo> Analyze(PdfDocument document, int threshold, PageIncompleteness? incomplete = null)
     {
         var results = new List<ImageDpiInfo>();
-        var interpreter = new ContentInterpreter(document.Resolve, StreamDecoder.Decode);
+        var interpreter = new ContentInterpreter(document.Resolve, document.Decode, document.Budget);
 
         foreach (PdfPage page in document.Pages)
         {
-            byte[] content = DecodeContents(document, page);
+            byte[] content = DecodeContents(document, page, incomplete);
             if (content.Length == 0) continue;
 
             PdfDictionary resources = page.Resources ?? EmptyResources;
@@ -40,9 +48,11 @@ internal static class DpiAnalyzer
             {
                 placements = interpreter.Run(content, resources, Matrix.Identity);
             }
-            catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+            catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
             {
-                continue; // a malformed page should not abort the whole document
+                // A malformed page, or one over its own budget, should not abort the whole document.
+                incomplete?.RecordContentFailure(page.Index, ex);
+                continue;
             }
 
             double pageArea = page.MediaBox.Width * page.MediaBox.Height;
@@ -55,7 +65,7 @@ internal static class DpiAnalyzer
         return results;
     }
 
-    private static byte[] DecodeContents(PdfDocument document, PdfPage page)
+    private static byte[] DecodeContents(PdfDocument document, PdfPage page, PageIncompleteness? incomplete)
     {
         PdfObject? contents = page.Dictionary["Contents"];
         if (contents is null) return Array.Empty<byte>();
@@ -65,7 +75,7 @@ internal static class DpiAnalyzer
             PdfObject resolved = document.Resolve(contents);
             if (resolved is PdfStream stream)
             {
-                return StreamDecoder.Decode(stream);
+                return document.Decode(stream);
             }
             if (resolved is PdfArray array)
             {
@@ -74,7 +84,7 @@ internal static class DpiAnalyzer
                 {
                     if (document.Resolve(item) is PdfStream part)
                     {
-                        byte[] decoded = StreamDecoder.Decode(part);
+                        byte[] decoded = document.Decode(part);
                         buffer.Write(decoded, 0, decoded.Length);
                         buffer.WriteByte((byte)'\n');
                     }
@@ -82,8 +92,9 @@ internal static class DpiAnalyzer
                 return buffer.ToArray();
             }
         }
-        catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+        catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
         {
+            incomplete?.RecordContentFailure(page.Index, ex);
             return Array.Empty<byte>();
         }
 

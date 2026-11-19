@@ -16,8 +16,11 @@ internal static class ImageExtractor
     private static readonly PdfDictionary Empty = new PdfDictionary(new Dictionary<string, PdfObject>());
 
     public static IReadOnlyList<PdfImageInfo> Extract(Stream stream, string? password = null)
+        => Extract(stream, password, PdfLimits.Default);
+
+    public static IReadOnlyList<PdfImageInfo> Extract(Stream stream, string? password, PdfLimits limits)
     {
-        using PdfDocument document = PdfDocument.Open(stream, password);
+        using PdfDocument document = PdfDocument.Open(stream, password, limits);
         var images = new List<PdfImageInfo>();
 
         foreach (PdfPage page in document.Pages)
@@ -226,9 +229,9 @@ internal static class ImageExtractor
             {
                 try
                 {
-                    return StreamDecoder.Decode(globals);
+                    return document.Decode(globals);
                 }
-                catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+                catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
                 {
                     return null;
                 }

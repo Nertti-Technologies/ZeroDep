@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using ZeroDep.Abstractions;
 using ZeroDep.Model;
+using ZeroDep.Objects;
 using ZeroDep.Validation;
 
 namespace ZeroDep.Analysis;
@@ -18,10 +19,25 @@ internal static class DocumentAnalyzer
     /// <summary>Opens a PDF stream and produces the full analysis (or a structured rejection).</summary>
     /// <exception cref="ArgumentNullException"><paramref name="stream"/> is null.</exception>
     public static DocumentAnalysis Analyze(Stream stream, int dpiThreshold, string? password = null)
+        => Analyze(stream, dpiThreshold, password, PdfLimits.Default);
+
+    /// <summary>
+    /// Opens a PDF stream within <paramref name="limits"/> and produces the full analysis (or a structured
+    /// rejection). A limit breach that ends the document, including the document work budget, is reported
+    /// as <see cref="RejectionReason.ResourceLimitExceeded"/>; a page that loses content to a limit is kept
+    /// and marked incomplete.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="stream"/> or <paramref name="limits"/> is null.</exception>
+    public static DocumentAnalysis Analyze(Stream stream, int dpiThreshold, string? password, PdfLimits limits)
     {
         if (stream is null)
         {
             throw new ArgumentNullException(nameof(stream));
+        }
+
+        if (limits is null)
+        {
+            throw new ArgumentNullException(nameof(limits));
         }
 
         try
@@ -32,13 +48,16 @@ internal static class DocumentAnalyzer
                 return Rejected(preflight.Value, "Pre-flight integrity check failed.");
             }
 
-            using PdfDocument document = PdfDocument.Open(stream, password);
+            using PdfDocument document = PdfDocument.Open(stream, password, limits);
 
+            // The analyzers share only this collector: each records the pages it could not read in full,
+            // and the classifier reports them (ADR-0010 option C2).
+            var incomplete = new PageIncompleteness();
             SecurityInfo security = BuildSecurity(document);
-            IReadOnlyList<ImageDpiInfo> images = DpiAnalyzer.Analyze(document, dpiThreshold);
-            IReadOnlyList<TextRunInfo> textRuns = TextAnalyzer.AnalyzeWithStructure(document, out IReadOnlyList<PageStructure> pageStructures);
+            IReadOnlyList<ImageDpiInfo> images = DpiAnalyzer.Analyze(document, dpiThreshold, incomplete);
+            IReadOnlyList<TextRunInfo> textRuns = TextAnalyzer.AnalyzeWithStructure(document, out IReadOnlyList<PageStructure> pageStructures, incomplete);
             AcroFormReport form = AcroFormAnalyzer.Analyze(document);
-            IReadOnlyList<PageClassification> pages = PageClassifier.Classify(document, textRuns, images, form, pageStructures);
+            IReadOnlyList<PageClassification> pages = PageClassifier.Classify(document, textRuns, images, form, pageStructures, incomplete);
 
             return new DocumentAnalysis
             {
@@ -53,9 +72,17 @@ internal static class DocumentAnalyzer
                 Pages = pages,
             };
         }
+        catch (PdfLimitExceededException ex)
+        {
+            return Rejected(RejectionReason.ResourceLimitExceeded, ex.Message);
+        }
         catch (PdfSyntaxException ex)
         {
             return Rejected(PdfValidator.Classify(ex.Message), ex.Message);
+        }
+        catch (Exception ex) when (ResourceBudget.AsLimitExceeded(ex) is { } limit)
+        {
+            return Rejected(RejectionReason.ResourceLimitExceeded, limit.Message);
         }
         catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
         {

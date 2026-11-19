@@ -1,5 +1,6 @@
 using System;
 using ZeroDep.Abstractions;
+using ZeroDep.Objects;
 
 namespace ZeroDep.Analysis;
 
@@ -17,6 +18,13 @@ internal static class ExceptionBoundary
     public static bool IsTranslatable(Exception exception) => exception is not OutOfMemoryException;
 
     /// <summary>
+    /// True for an exception that a per-page or per-image catch may absorb (recording the part as incomplete):
+    /// anything translatable except a breach of the document work budget, which must end the whole document.
+    /// </summary>
+    public static bool IsPartRecoverable(Exception exception)
+        => IsTranslatable(exception) && !ResourceBudget.IsDocumentLimit(exception);
+
+    /// <summary>
     /// Runs <paramref name="body"/> and rethrows any translatable exception other than a
     /// <see cref="PdfSyntaxException"/> as a <see cref="PdfSyntaxException"/> that wraps it.
     /// </summary>
@@ -29,6 +37,10 @@ internal static class ExceptionBoundary
         catch (PdfSyntaxException)
         {
             throw;
+        }
+        catch (Exception ex) when (ResourceBudget.AsLimitExceeded(ex) is { } limit)
+        {
+            throw new PdfLimitExceededException(limit.LimitName, limit.Limit, limit.Message, ex);
         }
         catch (Exception ex) when (IsTranslatable(ex))
         {

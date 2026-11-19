@@ -8,9 +8,11 @@ public sealed class DocumentAnalysis
 {
     /// <summary>
     /// The output schema version. <c>1.1</c> adds the per-page <see cref="Pages"/> classification; <c>1.2</c>
-    /// adds <c>signals.textDecodeConfidence</c> (the per-page text-decode trust signal, ADR-0007).
+    /// adds <c>signals.textDecodeConfidence</c> (the per-page text-decode trust signal, ADR-0007); <c>1.3</c>
+    /// adds the per-page <c>incomplete</c> and <c>incompleteReasons</c> and the <c>ResourceLimitExceeded</c>
+    /// rejection reason (ADR-0010).
     /// </summary>
-    public string SchemaVersion { get; init; } = "1.2";
+    public string SchemaVersion { get; init; } = "1.3";
 
     /// <summary>Whether the document was processed or rejected.</summary>
     public DocumentStatus Status { get; init; } = DocumentStatus.Processed;

@@ -20,31 +20,38 @@ internal static class TextAnalyzer
 
     /// <summary>Opens a PDF stream and extracts all text runs.</summary>
     public static IReadOnlyList<TextRunInfo> Analyze(Stream stream, string? password = null)
+        => Analyze(stream, password, PdfLimits.Default);
+
+    /// <summary>Opens a PDF stream within <paramref name="limits"/> and extracts all text runs.</summary>
+    public static IReadOnlyList<TextRunInfo> Analyze(Stream stream, string? password, PdfLimits limits)
     {
-        using PdfDocument document = PdfDocument.Open(stream, password);
+        using PdfDocument document = PdfDocument.Open(stream, password, limits);
         return Analyze(document);
     }
 
     /// <summary>Extracts all text runs from an open document.</summary>
     public static IReadOnlyList<TextRunInfo> Analyze(PdfDocument document)
-        => AnalyzeInternal(document, out _);
+        => AnalyzeInternal(document, null, out _);
 
     /// <summary>
     /// Extracts text runs and, alongside, the per-page structural signals gathered in the same content
-    /// pass (ruling-line count, distinct-font count) for per-page classification (ADR-0003).
+    /// pass (ruling-line count, distinct-font count) for per-page classification (ADR-0003). Pages whose
+    /// content is skipped or partial are recorded in <paramref name="incomplete"/> when it is given.
     /// </summary>
-    public static IReadOnlyList<TextRunInfo> AnalyzeWithStructure(PdfDocument document, out IReadOnlyList<PageStructure> pageStructures)
-        => AnalyzeInternal(document, out pageStructures);
+    public static IReadOnlyList<TextRunInfo> AnalyzeWithStructure(
+        PdfDocument document, out IReadOnlyList<PageStructure> pageStructures, PageIncompleteness? incomplete = null)
+        => AnalyzeInternal(document, incomplete, out pageStructures);
 
-    private static IReadOnlyList<TextRunInfo> AnalyzeInternal(PdfDocument document, out IReadOnlyList<PageStructure> pageStructures)
+    private static IReadOnlyList<TextRunInfo> AnalyzeInternal(
+        PdfDocument document, PageIncompleteness? incomplete, out IReadOnlyList<PageStructure> pageStructures)
     {
         var runs = new List<TextRunInfo>();
         var structures = new List<PageStructure>();
-        var interpreter = new ContentInterpreter(document.Resolve, StreamDecoder.Decode);
+        var interpreter = new ContentInterpreter(document.Resolve, document.Decode, document.Budget);
 
         foreach (PdfPage page in document.Pages)
         {
-            byte[] content = DecodeContents(document, page);
+            byte[] content = DecodeContents(document, page, incomplete);
             if (content.Length == 0) continue;
 
             PdfDictionary resources = page.Resources ?? EmptyResources;
@@ -53,9 +60,15 @@ internal static class TextAnalyzer
             {
                 result = interpreter.RunAll(content, resources, Matrix.Identity);
             }
-            catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+            catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
             {
+                incomplete?.RecordContentFailure(page.Index, ex);
                 continue;
+            }
+
+            if (result.FontMapLimitExceeded)
+            {
+                incomplete?.Record(page.Index, PageIncompleteness.FontMapLimitExceeded);
             }
 
             foreach (TextRun run in result.TextRuns)
@@ -85,7 +98,10 @@ internal static class TextAnalyzer
     }
 
     /// <summary>Opens a PDF stream and returns a simple, line-grouped plain-text rendering.</summary>
-    public static string GetPlainText(Stream stream, string? password = null) => BuildPlainText(Analyze(stream, password));
+    public static string GetPlainText(Stream stream, string? password = null) => GetPlainText(stream, password, PdfLimits.Default);
+
+    /// <summary>Opens a PDF stream within <paramref name="limits"/> and returns a simple, line-grouped plain-text rendering.</summary>
+    public static string GetPlainText(Stream stream, string? password, PdfLimits limits) => BuildPlainText(Analyze(stream, password, limits));
 
     // Insert a space between runs when the positional gap exceeds this fraction of the font's space advance
     // (ADR-0008). 0.5 catches genuine one-space gaps while staying clear of tight intra-word kerning.
@@ -132,7 +148,7 @@ internal static class TextAnalyzer
         return sb.ToString();
     }
 
-    private static byte[] DecodeContents(PdfDocument document, PdfPage page)
+    private static byte[] DecodeContents(PdfDocument document, PdfPage page, PageIncompleteness? incomplete)
     {
         PdfObject? contents = page.Dictionary["Contents"];
         if (contents is null) return Array.Empty<byte>();
@@ -142,7 +158,7 @@ internal static class TextAnalyzer
             PdfObject resolved = document.Resolve(contents);
             if (resolved is PdfStream stream)
             {
-                return StreamDecoder.Decode(stream);
+                return document.Decode(stream);
             }
             if (resolved is PdfArray array)
             {
@@ -151,7 +167,7 @@ internal static class TextAnalyzer
                 {
                     if (document.Resolve(item) is PdfStream part)
                     {
-                        byte[] decoded = StreamDecoder.Decode(part);
+                        byte[] decoded = document.Decode(part);
                         buffer.Write(decoded, 0, decoded.Length);
                         buffer.WriteByte((byte)'\n');
                     }
@@ -159,8 +175,9 @@ internal static class TextAnalyzer
                 return buffer.ToArray();
             }
         }
-        catch (Exception ex) when (ExceptionBoundary.IsTranslatable(ex))
+        catch (Exception ex) when (ExceptionBoundary.IsPartRecoverable(ex))
         {
+            incomplete?.RecordContentFailure(page.Index, ex);
             return Array.Empty<byte>();
         }
         return Array.Empty<byte>();
