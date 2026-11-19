@@ -59,15 +59,36 @@ internal sealed class FontInfo
     private readonly bool _symbolic;
 
     public FontInfo(PdfDictionary dict, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decode)
+        : this(dict, resolve, decode, PdfLimits.Default.MaxCMapEntries)
+    {
+    }
+
+    /// <param name="dict">The font dictionary.</param>
+    /// <param name="resolve">Resolves indirect references.</param>
+    /// <param name="decode">Decodes a stream's filters.</param>
+    /// <param name="maxMapEntries">The caller's <see cref="PdfLimits.MaxCMapEntries"/>.</param>
+    public FontInfo(PdfDictionary dict, Func<PdfObject, PdfObject> resolve, Func<PdfStream, byte[]> decode, int maxMapEntries)
     {
         bool isType0 = (dict["Subtype"] as PdfName)?.Value == "Type0";
         _codeBytes = isType0 ? 2 : 1;
 
         if (resolve(dict["ToUnicode"] ?? PdfNull.Instance) is PdfStream toUnicodeStream)
         {
-            // A map that is malformed or exceeds Limits.MaxCMapEntries is dropped (decoding then falls back).
-            try { _toUnicode = ToUnicodeCMap.Parse(decode(toUnicodeStream)); }
-            catch { _toUnicode = null; }
+            // A map that is malformed or exceeds a limit is dropped (decoding then falls back). A breach of the
+            // document work budget is not this font's failure, so it surfaces.
+            try
+            {
+                _toUnicode = ToUnicodeCMap.Parse(decode(toUnicodeStream), maxMapEntries);
+            }
+            catch (PdfLimitExceededException ex) when (!ResourceBudget.IsDocumentLimit(ex))
+            {
+                _toUnicode = null;
+                MapLimitExceeded = true;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException && !ResourceBudget.IsDocumentLimit(ex))
+            {
+                _toUnicode = null;
+            }
         }
 
         if (isType0)
@@ -80,9 +101,20 @@ internal sealed class FontInfo
                 if (resolve(cidFont["DW"] ?? PdfNull.Instance) is PdfNumber dw) _defaultWidth = dw.AsDouble;
                 if (resolve(cidFont["W"] ?? PdfNull.Instance) is PdfArray w)
                 {
-                    // A /W array that exceeds Limits.MaxCMapEntries is dropped (widths fall back to /DW).
-                    try { _cidWidths = ParseCidWidths(resolve, w); }
-                    catch (PdfSyntaxException) { _cidWidths = null; }
+                    // A /W array that exceeds the entry limit is dropped (widths fall back to /DW).
+                    try
+                    {
+                        _cidWidths = ParseCidWidths(resolve, w, maxMapEntries);
+                    }
+                    catch (PdfLimitExceededException ex) when (!ResourceBudget.IsDocumentLimit(ex))
+                    {
+                        _cidWidths = null;
+                        MapLimitExceeded = true;
+                    }
+                    catch (PdfSyntaxException ex) when (!ResourceBudget.IsDocumentLimit(ex))
+                    {
+                        _cidWidths = null;
+                    }
                 }
             }
         }
@@ -150,6 +182,12 @@ internal sealed class FontInfo
     }
 
     /// <summary>Entries in the font's /ToUnicode and /W maps, for the caller's work budget.</summary>
+    /// <summary>
+    /// Whether a /ToUnicode map or /W array of this font exceeded a limit (such as
+    /// <see cref="PdfLimits.MaxCMapEntries"/>) and was dropped, so the font's text or widths are partial.
+    /// </summary>
+    public bool MapLimitExceeded { get; }
+
     public long MapEntryCount => (long)(_toUnicode?.Count ?? 0) + (_cidWidths?.Count ?? 0);
 
     /// <summary>
@@ -260,8 +298,8 @@ internal sealed class FontInfo
     }
 
     // CIDs are 0..65535; entries outside are ignored. Every entry written, including overwrites, counts
-    // toward Limits.MaxCMapEntries, so repeated ranges cannot multiply the work.
-    private static Dictionary<int, double> ParseCidWidths(Func<PdfObject, PdfObject> resolve, PdfArray w)
+    // toward the caller's MaxCMapEntries, so repeated ranges cannot multiply the work.
+    private static Dictionary<int, double> ParseCidWidths(Func<PdfObject, PdfObject> resolve, PdfArray w, int maxEntries)
     {
         const long MaxCid = 0xFFFF;
         var map = new Dictionary<int, double>();
@@ -269,9 +307,10 @@ internal sealed class FontInfo
 
         void Put(long cid, double width)
         {
-            if (++entries > Limits.MaxCMapEntries)
+            if (++entries > maxEntries)
             {
-                throw new PdfSyntaxException($"Font /W array exceeds the limit of {Limits.MaxCMapEntries} entries.");
+                throw new PdfLimitExceededException(
+                    nameof(PdfLimits.MaxCMapEntries), maxEntries, $"Font /W array exceeds the limit of {maxEntries} entries.");
             }
 
             if (cid >= 0 && cid <= MaxCid) map[(int)cid] = width;
@@ -355,13 +394,16 @@ internal sealed class FontInfo
 /// <summary>Parses a /ToUnicode CMap (bfchar/bfrange) into a code → Unicode map (ISO 32000-2 §9.10.3).</summary>
 internal static class ToUnicodeCMap
 {
+    /// <summary>Parses the map within the default <see cref="PdfLimits.MaxCMapEntries"/>.</summary>
+    public static Dictionary<int, string> Parse(byte[] data) => Parse(data, PdfLimits.Default.MaxCMapEntries);
+
     /// <summary>
-    /// Parses the map. Throws <see cref="PdfSyntaxException"/> when it writes more than
-    /// <see cref="Limits.MaxCMapEntries"/> entries (overwrites included).
+    /// Parses the map. Throws <see cref="PdfLimitExceededException"/> when it writes more than
+    /// <paramref name="maxEntries"/> entries (overwrites included).
     /// </summary>
-    public static Dictionary<int, string> Parse(byte[] data)
+    public static Dictionary<int, string> Parse(byte[] data, int maxEntries)
     {
-        var map = new CountedMap();
+        var map = new CountedMap(maxEntries);
         var lexer = new PdfLexer(data, 0, data.Length);
         while (true)
         {
@@ -377,7 +419,10 @@ internal static class ToUnicodeCMap
     // Counts every write so that the total, not only the distinct codes, is bounded.
     private sealed class CountedMap
     {
+        private readonly int _maxEntries;
         private long _writes;
+
+        public CountedMap(int maxEntries) => _maxEntries = maxEntries;
 
         public Dictionary<int, string> Map { get; } = new Dictionary<int, string>();
 
@@ -385,9 +430,10 @@ internal static class ToUnicodeCMap
         {
             set
             {
-                if (++_writes > Limits.MaxCMapEntries)
+                if (++_writes > _maxEntries)
                 {
-                    throw new PdfSyntaxException($"ToUnicode CMap exceeds the limit of {Limits.MaxCMapEntries} entries.");
+                    throw new PdfLimitExceededException(
+                        nameof(PdfLimits.MaxCMapEntries), _maxEntries, $"ToUnicode CMap exceeds the limit of {_maxEntries} entries.");
                 }
 
                 Map[code] = value;
