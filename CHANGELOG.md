@@ -26,13 +26,27 @@ All notable changes to **ZeroDep** are documented here. The format follows
 - The TrueType hinting interpreter now has an instruction budget of 1,000,000 for each program (font,
   control value and glyph); a font that exceeds it falls back to the unhinted outline.
 
+### Added
+
+- **Configurable resource limits.** New `PdfLimits` (decoded stream size, image pixels, work per page and per
+  document, form fields, font map entries) with the previous fixed values as defaults, set through the new
+  `AnalyzerOptions.Limits`. Every `PdfAnalyzer` method gains an `(Stream, AnalyzerOptions)` overload, the
+  public stream and image decoders and `ColorConverter.ToRgb` gain a `PdfLimits` overload, and the existing
+  overloads keep their behaviour.
+- **`PdfLimitExceededException`**, derived from `PdfSyntaxException`, with `LimitName` and `Limit`. Public
+  decoders still throw `InvalidDataException` and carry it as the inner exception.
+- **`RejectionReason.ResourceLimitExceeded`** for documents rejected because a limit was hit.
+- **Incomplete pages.** `PageClassification.Incomplete` and `IncompleteReasons` mark a page whose content was
+  only partly read because of a limit or unreadable content; both are emitted in the JSON, whose schema
+  version is now 1.3.
+- A document-wide work budget now also counts object reads, so the total effort for one file is bounded.
+
 ### Fixed
 
 - **Bounded processing of malformed input.** Parsing, stream and image decoding, colour conversion, content
   interpretation and font handling now enforce fixed limits on nesting depth, decoded size, pixel count and
   work, and detect reference cycles. An input that exceeds a limit is rejected, or the affected page, image
-  or glyph is skipped, instead of exhausting the stack, memory or CPU. The limits are internal constants in
-  this release.
+  or glyph is skipped, instead of exhausting the stack, memory or CPU.
 - **Exception contract.** `PdfAnalyzer.Analyze` and `ToJson` report any non-fatal failure as a `Rejected`
   result. The extraction methods throw only `PdfSyntaxException` for bad input, `PdfDocument.Open` likewise,
   and the public stream and image decoders throw only `InvalidDataException` or `NotSupportedException`.

@@ -244,6 +244,61 @@ adapter cuts the character error by **roughly half to two-thirds** on the same p
 engine that fits your documents without touching the dependency-free core. Both reference adapters reach
 their engine out-of-process (a CLI binary / a worker process), so neither bundles native binaries.
 
+## Resource limits
+
+Every analysis runs under a set of resource limits, so a malformed or oversized file cannot exhaust memory or
+CPU. The defaults suit ordinary documents; set `AnalyzerOptions.Limits` to tighten them for untrusted input or
+to raise them for very large files.
+
+```csharp
+var options = new AnalyzerOptions
+{
+    DpiThreshold = 150,
+    Limits = new PdfLimits
+    {
+        MaxDecodedStreamBytes = 64L * 1024 * 1024,  // 64 MiB per decoded stream
+        MaxWorkPerDocument = 100_000_000,
+    },
+};
+
+DocumentAnalysis result = PdfAnalyzer.Analyze(File.OpenRead("upload.pdf"), options);
+if (result.Rejection?.Reason == RejectionReason.ResourceLimitExceeded)
+{
+    // Too large or too complex for the configured limits.
+}
+```
+
+Every `PdfAnalyzer` method has an `(Stream, AnalyzerOptions)` overload, and the public stream and image
+decoders and `ColorConverter.ToRgb` have overloads that take a `PdfLimits`. The existing overloads use
+`PdfLimits.Default`.
+
+| Limit | Default | Bounds |
+|---|---|---|
+| `MaxDecodedStreamBytes` | 256 MiB | Output of one decoded stream; also the largest object read from the file |
+| `MaxImagePixels` | 2<sup>28</sup> (268,435,456) | Pixels in one image; a decoder's working set is 4 bytes per allowed pixel |
+| `MaxWorkPerPage` | 50,000,000 | Content operators and glyphs interpreted for one page, including Form XObjects |
+| `MaxWorkPerDocument` | 250,000,000 | All content work plus object reads (one unit per 64 bytes) across the document |
+| `MaxFormFields` | 100,000 | Interactive form fields |
+| `MaxCMapEntries` | 1,048,576 | Entries in one font character map or width table |
+
+The defaults are **estimates**: sized to stay well above what ordinary documents need while keeping one
+analysis within a few gigabytes of memory, not measured against a corpus. Each value must be greater than
+zero; a value of zero or less throws `ArgumentOutOfRangeException`.
+
+What happens when a limit is exceeded:
+
+- **`Analyze` / `ToJson`** do not throw for it. A limit that stops the whole document (the document work
+  budget, an object larger than the decoded-stream limit, too many form fields) gives a `Rejected` result
+  with reason `ResourceLimitExceeded`. A limit hit while reading one page's content keeps the document: that
+  page is reported with `Incomplete = true` and one or more stable `IncompleteReasons` codes —
+  `PageWorkLimit`, `ContentLimitExceeded`, `ContentUnreadable` or `FontMapLimitExceeded`.
+- **The extraction methods** (`ExtractText`, `ExtractForm`, `ExtractImages`, …) skip a page or image that
+  hits a per-part limit, and throw `PdfLimitExceededException` for a document-wide one. It derives from
+  `PdfSyntaxException`, so existing handlers keep working; `LimitName` names the limit (a `PdfLimits`
+  property, or a fixed structural limit such as `MaxNestingDepth`) and `Limit` gives its value.
+- **The standalone decoders** keep their contract and throw `InvalidDataException`; when a limit was the
+  cause, its `InnerException` is the `PdfLimitExceededException`.
+
 ## Command-line tool
 
 A thin, zero-dependency console front-end ships alongside the library.
@@ -303,15 +358,17 @@ reported with flags rather than dropped silently.
 
 ```jsonc
 {
-  "schemaVersion": "1.2",
+  "schemaVersion": "1.3",
   "status": "Processed",            // Processed | Rejected
-  "rejection": null,                // { "reason": "TruncatedStream", "detail": "..." } when Rejected
+  "rejection": null,                // { "reason": "TruncatedStream", "detail": "..." } when Rejected; ResourceLimitExceeded when a limit was hit
   "pageCount": 3,
   "imageAreaFraction": 0.94,
   "security": { "isEncrypted": true, "algorithm": "AES-256", "authentication": "UserPassword", "...": "..." },
   "images":   [ { "page": 0, "effectiveDpi": 200.0, "belowThreshold": false, "pageAreaFraction": 0.94 } ],
   "textRuns": [ { "page": 0, "text": "Invoice", "renderMode": 0, "isOcrLayer": false } ],
-  "form":     { "hasAcroForm": true, "hasXfa": false, "fields": [ /* ... */ ] }
+  "form":     { "hasAcroForm": true, "hasXfa": false, "fields": [ /* ... */ ] },
+  "pages":    [ { "index": 0, "class": "DigitalText", "signals": { /* ... */ },
+                  "incomplete": false, "incompleteReasons": [] } ]
 }
 ```
 
