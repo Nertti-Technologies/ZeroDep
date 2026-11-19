@@ -74,12 +74,14 @@ public sealed class ContentLimitsTests
         }
 
         int decodes = 0;
-        ContentInterpreter interp = Interpreter(objects, s => { decodes++; return s.GetRawBytes(); });
+        // A small budget exercises the same limit without spending the full page budget's CPU time.
+        ContentInterpreter interp = new ContentInterpreter(
+            o => o is PdfReference r && objects.TryGetValue(r.ObjectNumber, out PdfObject? v) ? v : o,
+            s => { decodes++; return s.GetRawBytes(); })
+        { MaxWorkPerPage = 1_000_000 };
         PdfDictionary pageRes = Dict(("XObject", Dict(("F", Ref(100)))));
 
-        // This case bounds CPU, not memory: the 5 × 10^7 tokens it runs each allocate short-lived objects,
-        // so the allocation total (all garbage) is bounded by the budget rather than by a small constant.
-        Exception? ex = Bounded.Run(() => interp.RunAll(B("/F Do"), pageRes, Matrix.Identity), maxBytes: 8L * 1024 * 1024 * 1024);
+        Exception? ex = Bounded.Run(() => interp.RunAll(B("/F Do"), pageRes, Matrix.Identity), maxBytes: 512L * 1024 * 1024);
         Assert.IsType<PdfSyntaxException>(ex);
         Assert.True(decodes <= Levels, $"each form is decoded once per page, saw {decodes} decodes");
     }

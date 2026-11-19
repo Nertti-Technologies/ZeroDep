@@ -45,26 +45,32 @@ internal sealed class ContentInterpreter
     public ContentResult RunAll(byte[] content, PdfDictionary resources, Matrix initial)
     {
         var result = new ContentResult();
-        Execute(content, resources, initial, result, 0, new RunState());
+        Execute(content, resources, initial, result, 0, new RunState(MaxWorkPerPage));
         return result;
     }
+
+    // The page work budget; tests lower it to exercise the limit cheaply. Phase 2 sets it from the caller's limits.
+    internal long MaxWorkPerPage { get; init; } = Limits.MaxWorkPerPage;
 
     // State shared by one page run across nested Form XObjects: the work budget, the forms on the call
     // stack (a form that invokes itself is skipped), and the decoded content of forms and the fonts
     // (by object number) already loaded, so repeated form runs do not repeat that work.
     private sealed class RunState
     {
+        private readonly long _maxWork;
         public long Work;
         public readonly HashSet<int> ActiveForms = new HashSet<int>();
         public readonly Dictionary<int, byte[]> FormContent = new Dictionary<int, byte[]>();
         public readonly Dictionary<int, FontInfo?> Fonts = new Dictionary<int, FontInfo?>();
 
+        public RunState(long maxWork) => _maxWork = maxWork;
+
         public void Charge(long units)
         {
             Work += units;
-            if (Work > Limits.MaxWorkPerPage)
+            if (Work > _maxWork)
             {
-                throw new PdfSyntaxException($"Page content exceeds the work limit of {Limits.MaxWorkPerPage}.");
+                throw new PdfSyntaxException($"Page content exceeds the work limit of {_maxWork}.");
             }
         }
     }
